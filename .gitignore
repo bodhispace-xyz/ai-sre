@@ -1,0 +1,9 @@
+/target/
+.idea/
+.DS_Store
+*.swp
+*.swo
+.env
+.env.*
+!.env.example
+coverage/
