@@ -10,6 +10,10 @@ use thiserror::Error;
 pub const MAX_TOOL_CALL_ID_BYTES: usize = 128;
 /// Maximum serialized provider argument bytes accepted before parsing.
 pub const MAX_TOOL_ARGUMENT_BYTES: usize = 16_384;
+/// Maximum tool calls accepted from one provider response.
+pub const MAX_TOOL_CALLS_PER_RESPONSE: usize = 8;
+/// Maximum serialized result detail retained for one provider resumption.
+pub const MAX_TOOL_RESULT_BYTES: usize = 64 * 1024;
 
 /// The only model-directed context capabilities admitted by the MVP.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -186,6 +190,11 @@ impl ToolLoop {
     /// Returns the immutable tool-result transcript for provider resumption.
     pub fn results(&self) -> &[ToolResult] {
         &self.results
+    }
+
+    /// Returns the bounded result-detail bytes retained for resumption.
+    pub fn result_bytes(&self) -> usize {
+        self.results.iter().map(|result| result.detail.len()).sum()
     }
 }
 

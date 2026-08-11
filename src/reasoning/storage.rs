@@ -188,6 +188,79 @@ impl JournalStore {
         Ok(sequence)
     }
 
+    /// Appends a checkpoint once, making retries after an ambiguous commit idempotent.
+    pub fn append_checkpoint_scoped(
+        &mut self,
+        checkpoint_id: &str,
+        events: &[JournalEvent],
+        context: Option<&JournalContext>,
+    ) -> Result<bool, JournalStoreError> {
+        let marker_key = format!("journal-checkpoint:{checkpoint_id}");
+        let transaction = self.connection.transaction()?;
+        let exists = transaction
+            .query_row(
+                "SELECT 1 FROM journal_markers WHERE key = ?1",
+                params![marker_key],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if exists {
+            return Ok(false);
+        }
+        let start = self.journal.entries().len() as u64;
+        for (offset, event) in events.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO journal_events(sequence, event_json, incident_id, run_id)
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![
+                    i64::try_from(start + offset as u64).map_err(|_| {
+                        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(
+                            "sequence overflow",
+                        )))
+                    })?,
+                    serde_json::to_string(event)?,
+                    context.map(|context| context.incident_id.as_str()),
+                    context.map(|context| context.run_id.as_str()),
+                ],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO journal_markers(key, value) VALUES (?1, ?2)",
+            params![marker_key, checkpoint_id],
+        )?;
+        transaction.commit()?;
+        for (offset, event) in events.iter().cloned().enumerate() {
+            self.journal.restore(JournalEntry {
+                sequence: start + offset as u64,
+                context: context.cloned(),
+                event,
+            });
+        }
+        Ok(true)
+    }
+
+    /// Returns whether a scoped tool request is still unresolved.
+    pub fn tool_request_pending(&self, context: &JournalContext, call_id: &str) -> bool {
+        let requested = self.journal.entries().iter().any(|entry| {
+            entry.context.as_ref() == Some(context)
+                && matches!(&entry.event, JournalEvent::ToolRequested { call_id: id, .. } if id == call_id)
+        });
+        let completed = self.journal.entries().iter().any(|entry| {
+            entry.context.as_ref() == Some(context)
+                && matches!(&entry.event, JournalEvent::ToolContext { call_id: id, .. } if id == call_id)
+        });
+        requested && !completed
+    }
+
+    /// Returns whether a scoped tool call has already entered the durable log.
+    pub fn tool_request_recorded(&self, context: &JournalContext, call_id: &str) -> bool {
+        self.journal.entries().iter().any(|entry| {
+            entry.context.as_ref() == Some(context)
+                && matches!(&entry.event, JournalEvent::ToolRequested { call_id: id, .. } if id == call_id)
+        })
+    }
+
     /// Appends facts and an optional notification intent atomically.
     pub fn append_with_outbox(
         &mut self,

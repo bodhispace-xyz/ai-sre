@@ -12,7 +12,9 @@ use ai_sre::reasoning::coordinator::{
     ReasoningRun, RunStatus,
 };
 use ai_sre::reasoning::evidence::{EvidenceBoard, EvidenceError, EvidenceSource};
-use ai_sre::reasoning::journal::{IncidentJournal, JournalEvent, Phase, attempt_event};
+use ai_sre::reasoning::journal::{
+    IncidentJournal, JournalContext, JournalEvent, Phase, attempt_event, query_digest,
+};
 use ai_sre::reasoning::recorded::{RecordedAttempt, RecordedOutcome, RecordedProvider};
 use ai_sre::reasoning::router::{ProviderKind, ProviderOrder, next_provider, next_provider_in};
 use ai_sre::reasoning::runtime::IncidentRuntime;
@@ -395,6 +397,171 @@ fn journal_replay_derives_efficiency_without_turning_unknown_cost_into_zero() {
     assert_eq!(projection.terminal_provider, Some(ProviderKind::Gemini));
     assert_eq!(journal.entries()[0].sequence, 0);
     assert_eq!(journal.entries()[4].sequence, 4);
+}
+
+#[test]
+fn journal_projection_rebuilds_bounded_tool_usage_without_raw_queries() {
+    // Given a journaled model-directed context call with a safe query digest.
+    let query = "{app=\"api\"}";
+    let mut journal = IncidentJournal::default();
+    journal.append(JournalEvent::ToolContext {
+        provider: ProviderKind::OpenAi,
+        call_id: "call-1".to_owned(),
+        tool: "query_logs".to_owned(),
+        query_digest: query_digest(query),
+        result_class: ai_sre::reasoning::tools::ToolResultClass::Succeeded,
+        elapsed_ms: 37,
+        output_bytes: 512,
+        evidence_queries_before: 2,
+        evidence_queries_after: 3,
+        at_ms: 41,
+    });
+
+    // When the efficiency projection is rebuilt from raw facts.
+    let projection = journal.project();
+
+    // Then usage is retained while the raw LogQL expression is absent.
+    assert_eq!(projection.tool_calls, 1);
+    assert_eq!(projection.successful_tool_calls, 1);
+    assert_eq!(projection.tool_elapsed_ms, 37);
+    assert_eq!(projection.tool_output_bytes, 512);
+    assert_ne!(
+        journal.entries()[0].event,
+        JournalEvent::ToolContext {
+            provider: ProviderKind::OpenAi,
+            call_id: "call-1".to_owned(),
+            tool: "query_logs".to_owned(),
+            query_digest: query.to_owned(),
+            result_class: ai_sre::reasoning::tools::ToolResultClass::Succeeded,
+            elapsed_ms: 37,
+            output_bytes: 512,
+            evidence_queries_before: 2,
+            evidence_queries_after: 3,
+            at_ms: 41,
+        }
+    );
+}
+
+#[test]
+fn query_digest_uses_a_versioned_fixed_vector() {
+    // Given a representative bounded LogQL expression.
+    let query = "{app=\"api\"}";
+
+    // When the durable correlation digest is calculated.
+    let digest = query_digest(query);
+
+    // Then the algorithm/version and exact digest remain compatible across upgrades.
+    assert_eq!(
+        digest,
+        "v1-sha256:4b2c72c47d366aa4ed1152ce6d16f6373c67a0e55cca170cf6e531a6d58d97ee"
+    );
+}
+
+#[test]
+fn journal_store_reopens_scoped_tool_context_projection() {
+    // Given a durable journal containing successful and denied tool results.
+    let path =
+        std::env::temp_dir().join(format!("ai-sre-tool-journal-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let context = JournalContext {
+        incident_id: "incident-1".to_owned(),
+        run_id: "run-1".to_owned(),
+    };
+    let mut store = ai_sre::reasoning::storage::JournalStore::open(&path).expect("open journal");
+    for (index, result_class) in [
+        ai_sre::reasoning::tools::ToolResultClass::Succeeded,
+        ai_sre::reasoning::tools::ToolResultClass::Denied,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        store
+            .append_scoped(
+                JournalEvent::ToolContext {
+                    provider: ProviderKind::OpenAi,
+                    call_id: format!("call-{index}"),
+                    tool: "query_logs".to_owned(),
+                    query_digest: query_digest("{app=\"api\"}"),
+                    result_class,
+                    elapsed_ms: 11,
+                    output_bytes: 128,
+                    evidence_queries_before: 1,
+                    evidence_queries_after: 2,
+                    at_ms: 12,
+                },
+                Some(&context),
+            )
+            .expect("append tool fact");
+    }
+    drop(store);
+
+    // When the database is reopened and the scoped projection is rebuilt.
+    let reopened = ai_sre::reasoning::storage::JournalStore::open(&path).expect("reopen journal");
+    let projection = reopened.efficiency_projection(&context);
+
+    // Then both result classes survive replay with only the successful call counted as committed.
+    assert_eq!(projection.tool_calls, 2);
+    assert_eq!(projection.successful_tool_calls, 1);
+    assert_eq!(projection.tool_elapsed_ms, 22);
+    assert_eq!(projection.tool_output_bytes, 256);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn journal_checkpoint_retries_are_idempotent_and_scope_isolated() {
+    // Given two runs that use the same provider call identifier.
+    let path = std::env::temp_dir().join(format!(
+        "ai-sre-checkpoint-idempotency-{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let first = JournalContext {
+        incident_id: "incident-a".to_owned(),
+        run_id: "run-a".to_owned(),
+    };
+    let second = JournalContext {
+        incident_id: "incident-b".to_owned(),
+        run_id: "run-b".to_owned(),
+    };
+    let requested = JournalEvent::ToolRequested {
+        provider: ProviderKind::OpenAi,
+        call_id: "shared-call".to_owned(),
+        tool: "query_logs".to_owned(),
+        query_digest: query_digest("{app=\"api\"}"),
+        evidence_queries_before: 0,
+        at_ms: 1,
+    };
+    let mut store = ai_sre::reasoning::storage::JournalStore::open(&path).expect("open journal");
+
+    // When the same durable checkpoint is retried after an ambiguous commit.
+    assert!(
+        store
+            .append_checkpoint_scoped("request-a", std::slice::from_ref(&requested), Some(&first))
+            .expect("first checkpoint")
+    );
+    assert!(
+        !store
+            .append_checkpoint_scoped("request-a", std::slice::from_ref(&requested), Some(&first))
+            .expect("retry checkpoint")
+    );
+    store
+        .append_checkpoint_scoped("request-b", std::slice::from_ref(&requested), Some(&second))
+        .expect("second scope checkpoint");
+
+    // Then replay keeps one event per checkpoint and never mixes scopes.
+    assert_eq!(store.journal().entries().len(), 2);
+    assert!(store.tool_request_recorded(&first, "shared-call"));
+    assert!(store.tool_request_recorded(&second, "shared-call"));
+    assert!(!store.tool_request_recorded(
+        &JournalContext {
+            incident_id: "incident-a".to_owned(),
+            run_id: "run-other".to_owned(),
+        },
+        "shared-call"
+    ));
+    let serialized = serde_json::to_string(store.journal().entries()).expect("serialize journal");
+    assert!(!serialized.contains("{app=\"api\"}"));
+    let _ = std::fs::remove_file(&path);
 }
 
 #[test]
