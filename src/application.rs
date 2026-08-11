@@ -24,6 +24,7 @@ use crate::{
     },
     bootstrap,
     config::AppConfig,
+    observability::MetricsSnapshot,
     reasoning::{
         budget::Reservation,
         dispatcher::IncidentDispatcher,
@@ -73,6 +74,8 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("state/ai-sre.sqlite"));
     let (sender, mut receiver) = mpsc::channel::<IntakeCommand>(64);
+    let metrics = MetricsSnapshot::default();
+    let worker_metrics = metrics.clone();
     let (worker_failed, worker_failed_rx) = oneshot::channel();
     let mut dispatcher = IncidentDispatcher::new(JournalStore::open(journal_path)?);
     let gemini = gated_api_provider("GEMINI_API_KEY", "GEMINI_GATE", "GEMINI_PRICE_CATALOG")
@@ -94,6 +97,9 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
 
     let worker = tokio::spawn(async move {
         drain_outbox(&mut dispatcher, ntfy.as_ref()).await;
+        worker_metrics
+            .replace_from(dispatcher.journal().journal())
+            .await;
         while let Some(command) = receiver.recv().await {
             let incidents = match dispatcher.process_new(command.batch) {
                 Ok(incidents) => {
@@ -107,6 +113,9 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
                     break;
                 }
             };
+            worker_metrics
+                .replace_from(dispatcher.journal().journal())
+                .await;
             for incident in incidents {
                 if !matches!(incident.status, AlertStatus::Firing) {
                     continue;
@@ -188,6 +197,9 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
                     }
                 }
                 drain_outbox(&mut dispatcher, ntfy.as_ref()).await;
+                worker_metrics
+                    .replace_from(dispatcher.journal().journal())
+                    .await;
             }
         }
     });
@@ -197,7 +209,7 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
     let intake_next_token = env::var("AI_SRE_ALERTMANAGER_NEXT_TOKEN").ok();
     let intake = AlertIntake::new(IntakeConfig::default())
         .with_bearer_tokens(intake_token, intake_next_token)
-        .serve(listener, sender);
+        .serve_with_metrics(listener, sender, metrics);
     tokio::pin!(intake);
     tokio::select! {
         result = &mut intake => result.map_err(ApplicationError::from),

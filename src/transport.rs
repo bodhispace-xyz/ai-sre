@@ -12,7 +12,7 @@ use axum::{
     extract::{State, rejection::BytesRejection},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::post,
+    routing::{get, post},
 };
 use thiserror::Error;
 use tokio::{
@@ -20,6 +20,7 @@ use tokio::{
     sync::{mpsc, oneshot},
 };
 
+use crate::observability::MetricsSnapshot;
 use crate::reasoning::incident::{AlertmanagerWebhook, IncidentSignal, normalize_webhook};
 
 /// The only HTTP route exposed by this intake.
@@ -83,6 +84,7 @@ pub enum IntakeError {
 struct IntakeState {
     intake: AlertIntake,
     sender: mpsc::Sender<IntakeCommand>,
+    metrics: MetricsSnapshot,
 }
 
 /// Bounded Alertmanager webhook listener.
@@ -171,19 +173,49 @@ impl AlertIntake {
         listener: TcpListener,
         sender: mpsc::Sender<IntakeCommand>,
     ) -> Result<(), IntakeError> {
+        self.serve_with_metrics(listener, sender, MetricsSnapshot::default())
+            .await
+    }
+
+    /// Serves the webhook and authenticated low-cardinality metrics endpoint.
+    pub async fn serve_with_metrics(
+        self,
+        listener: TcpListener,
+        sender: mpsc::Sender<IntakeCommand>,
+        metrics: MetricsSnapshot,
+    ) -> Result<(), IntakeError> {
         let max_body_bytes = self.config.max_body_bytes;
         let state = IntakeState {
             intake: self,
             sender,
+            metrics,
         };
         let app = Router::new()
             .route(ALERTMANAGER_PATH, post(handle_webhook))
+            .route("/metrics", get(handle_metrics))
             .with_state(state)
             .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes));
         axum::serve(listener, app)
             .await
             .map_err(|_| IntakeError::Io)
     }
+}
+
+async fn handle_metrics(State(state): State<IntakeState>, headers: HeaderMap) -> Response {
+    if authenticate(&state.intake, &headers).is_err() {
+        return response_with_close(StatusCode::UNAUTHORIZED);
+    }
+    let mut response = state.metrics.read().await.into_response();
+    *response.status_mut() = StatusCode::OK;
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/plain; version=0.0.4"),
+    );
+    response.headers_mut().insert(
+        axum::http::header::CONNECTION,
+        axum::http::HeaderValue::from_static("close"),
+    );
+    response
 }
 
 async fn handle_webhook(
