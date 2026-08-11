@@ -18,9 +18,13 @@ fn duplicate_lifecycle_signals_share_one_incident_identity() {
         fingerprint: "fp-123".to_owned(),
         labels: labels.clone(),
         annotations: BTreeMap::new(),
+        starts_at: "2026-08-11T10:00:00Z".to_owned(),
+        ends_at: String::new(),
+        generator_url: String::new(),
     };
     let resolved = AlertSignal {
         status: AlertStatus::Resolved,
+        ends_at: "2026-08-11T10:05:00Z".to_owned(),
         ..firing.clone()
     };
 
@@ -32,6 +36,9 @@ fn duplicate_lifecycle_signals_share_one_incident_identity() {
     assert_eq!(first.incident_id, recovery.incident_id);
     assert_eq!(first.status, AlertStatus::Firing);
     assert_eq!(recovery.status, AlertStatus::Resolved);
+    assert_eq!(first.event_time, "2026-08-11T10:00:00Z");
+    assert_eq!(recovery.event_time, "2026-08-11T10:05:00Z");
+    assert_ne!(first.source_event_id, recovery.source_event_id);
 }
 
 #[test]
@@ -44,6 +51,7 @@ fn journal_store_replays_entries_and_continues_the_sequence() {
         .append(JournalEvent::IncidentOpened {
             incident_id: "incident-fp-123".to_owned(),
             alert_name: "ApiDown".to_owned(),
+            event_time: String::new(),
         })
         .expect("append opening");
     assert_eq!(sequence, 0);
@@ -54,6 +62,7 @@ fn journal_store_replays_entries_and_continues_the_sequence() {
     let sequence = reopened
         .append(JournalEvent::IncidentRecovered {
             incident_id: "incident-fp-123".to_owned(),
+            event_time: String::new(),
         })
         .expect("append recovery");
 
@@ -78,6 +87,7 @@ fn journal_and_notification_intent_commit_atomically() {
             &[JournalEvent::IncidentOpened {
                 incident_id: "incident-outbox".to_owned(),
                 alert_name: "ApiDown".to_owned(),
+                event_time: String::new(),
             }],
             Some(&ai_sre::reasoning::storage::OutboxMessage {
                 delivery_id: "incident-outbox:report".to_owned(),

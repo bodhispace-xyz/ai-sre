@@ -17,7 +17,7 @@ use super::{
 };
 
 /// Result of processing one normalized incident signal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchOutcome {
     /// The signal started or advanced a new incident workflow.
     Accepted,
@@ -33,10 +33,17 @@ pub enum DispatchError {
     Journal(#[from] JournalStoreError),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 enum LifecycleState {
-    Firing { episode: u64, completed: bool },
-    Resolved { episode: u64 },
+    Firing {
+        episode: u64,
+        completed: bool,
+        last_event_time: String,
+    },
+    Resolved {
+        episode: u64,
+        last_event_time: String,
+    },
 }
 
 /// Durable single-writer dispatcher reconstructed from lifecycle facts.
@@ -52,37 +59,53 @@ impl IncidentDispatcher {
         let mut lifecycle = BTreeMap::new();
         for entry in journal.journal().entries() {
             match &entry.event {
-                JournalEvent::IncidentOpened { incident_id, .. } => {
+                JournalEvent::IncidentOpened {
+                    incident_id,
+                    event_time,
+                    ..
+                } => {
                     lifecycle.insert(
                         correlation_key(incident_id),
                         LifecycleState::Firing {
                             episode: episode_number(incident_id),
                             completed: false,
+                            last_event_time: event_time.clone(),
                         },
                     );
                 }
-                JournalEvent::IncidentRecovered { incident_id } => {
+                JournalEvent::IncidentRecovered {
+                    incident_id,
+                    event_time,
+                } => {
                     lifecycle.insert(
                         correlation_key(incident_id),
                         LifecycleState::Resolved {
                             episode: episode_number(incident_id),
+                            last_event_time: event_time.clone(),
                         },
                     );
                 }
                 JournalEvent::IncidentCompleted { incident_id } => {
                     let key = correlation_key(incident_id);
-                    if let Some(LifecycleState::Firing { episode, .. }) = lifecycle.get(&key) {
+                    if let Some(LifecycleState::Firing {
+                        episode,
+                        last_event_time,
+                        ..
+                    }) = lifecycle.get(&key)
+                    {
                         lifecycle.insert(
                             key,
                             LifecycleState::Firing {
                                 episode: *episode,
                                 completed: true,
+                                last_event_time: last_event_time.clone(),
                             },
                         );
                     }
                 }
                 JournalEvent::IncidentResumed { .. }
                 | JournalEvent::AlertDeduplicated { .. }
+                | JournalEvent::AlertOutOfOrder { .. }
                 | JournalEvent::EvidenceCommitted { .. }
                 | JournalEvent::ToolContext { .. }
                 | JournalEvent::ToolRequested { .. }
@@ -124,7 +147,27 @@ impl IncidentDispatcher {
         mut incident: IncidentSignal,
     ) -> Result<(IncidentSignal, DispatchOutcome), DispatchError> {
         let key = incident.correlation_id.clone();
-        let current = self.lifecycle.get(&key).copied();
+        let current = self.lifecycle.get(&key).cloned();
+        if let Some(last_event_time) = current.as_ref().map(|state| match state {
+            LifecycleState::Firing {
+                last_event_time, ..
+            }
+            | LifecycleState::Resolved {
+                last_event_time, ..
+            } => last_event_time,
+        }) {
+            if !incident.event_time.is_empty()
+                && !last_event_time.is_empty()
+                && incident.event_time.as_str() < last_event_time.as_str()
+            {
+                self.journal.append(JournalEvent::AlertOutOfOrder {
+                    incident_id: incident.incident_id.clone(),
+                    status: incident.status,
+                    event_time: incident.event_time.clone(),
+                })?;
+                return Ok((incident, DispatchOutcome::Deduplicated));
+            }
+        }
         match (incident.status, current) {
             (
                 AlertStatus::Firing,
@@ -149,18 +192,20 @@ impl IncidentDispatcher {
                 })?;
                 Ok((incident, DispatchOutcome::Accepted))
             }
-            (AlertStatus::Firing, Some(LifecycleState::Resolved { episode })) => {
+            (AlertStatus::Firing, Some(LifecycleState::Resolved { episode, .. })) => {
                 incident.episode = episode + 1;
                 incident.incident_id = format!("incident-{}-episode-{}", key, incident.episode);
                 self.journal.append(JournalEvent::IncidentOpened {
                     incident_id: incident.incident_id.clone(),
                     alert_name: incident.alert_name.clone(),
+                    event_time: incident.event_time.clone(),
                 })?;
                 self.lifecycle.insert(
                     key,
                     LifecycleState::Firing {
                         episode: incident.episode,
                         completed: false,
+                        last_event_time: incident.event_time.clone(),
                     },
                 );
                 Ok((incident, DispatchOutcome::Accepted))
@@ -168,11 +213,13 @@ impl IncidentDispatcher {
             (AlertStatus::Resolved, Some(LifecycleState::Firing { .. })) => {
                 self.journal.append(JournalEvent::IncidentRecovered {
                     incident_id: incident.incident_id.clone(),
+                    event_time: incident.event_time.clone(),
                 })?;
                 self.lifecycle.insert(
                     key,
                     LifecycleState::Resolved {
                         episode: incident.episode,
+                        last_event_time: incident.event_time.clone(),
                     },
                 );
                 Ok((incident, DispatchOutcome::Accepted))
@@ -181,12 +228,14 @@ impl IncidentDispatcher {
                 self.journal.append(JournalEvent::IncidentOpened {
                     incident_id: incident.incident_id.clone(),
                     alert_name: incident.alert_name.clone(),
+                    event_time: incident.event_time.clone(),
                 })?;
                 self.lifecycle.insert(
                     key,
                     LifecycleState::Firing {
                         episode: incident.episode,
                         completed: false,
+                        last_event_time: incident.event_time.clone(),
                     },
                 );
                 Ok((incident, DispatchOutcome::Accepted))
@@ -194,11 +243,13 @@ impl IncidentDispatcher {
             (AlertStatus::Resolved, None) => {
                 self.journal.append(JournalEvent::IncidentRecovered {
                     incident_id: incident.incident_id.clone(),
+                    event_time: incident.event_time.clone(),
                 })?;
                 self.lifecycle.insert(
                     key,
                     LifecycleState::Resolved {
                         episode: incident.episode,
+                        last_event_time: incident.event_time.clone(),
                     },
                 );
                 Ok((incident, DispatchOutcome::Accepted))
@@ -234,12 +285,18 @@ impl IncidentDispatcher {
             outbox.as_ref(),
         )?;
         let key = correlation_key(incident_id);
-        if let Some(LifecycleState::Firing { episode, .. }) = self.lifecycle.get(&key) {
+        if let Some(LifecycleState::Firing {
+            episode,
+            last_event_time,
+            ..
+        }) = self.lifecycle.get(&key)
+        {
             self.lifecycle.insert(
                 key,
                 LifecycleState::Firing {
                     episode: *episode,
                     completed: true,
+                    last_event_time: last_event_time.clone(),
                 },
             );
         }

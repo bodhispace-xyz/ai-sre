@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 /// An incoming alert or recovery notification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct AlertSignal {
     /// Alert status, normally `firing` or `resolved`.
     pub status: AlertStatus,
@@ -21,6 +22,15 @@ pub struct AlertSignal {
     /// Human-readable alert context.
     #[serde(default)]
     pub annotations: BTreeMap<String, String>,
+    /// RFC3339 timestamp at which a firing alert started.
+    #[serde(rename = "startsAt", default)]
+    pub starts_at: String,
+    /// RFC3339 timestamp at which a resolved alert ended.
+    #[serde(rename = "endsAt", default)]
+    pub ends_at: String,
+    /// Alertmanager generator URL retained only as source metadata.
+    #[serde(rename = "generatorURL", default)]
+    pub generator_url: String,
 }
 
 /// Alertmanager webhook envelope accepted by the HTTP intake.
@@ -91,6 +101,10 @@ pub struct IncidentSignal {
     pub labels: BTreeMap<String, String>,
     /// Original annotations retained for the report.
     pub annotations: BTreeMap<String, String>,
+    /// Source event time used to reject stale lifecycle updates.
+    pub event_time: String,
+    /// Stable source event identity for replay and diagnostics.
+    pub source_event_id: String,
 }
 
 /// Converts an external alert into a stable, secret-free incident signal.
@@ -105,6 +119,19 @@ pub fn normalize(signal: AlertSignal) -> IncidentSignal {
     } else {
         signal.fingerprint.clone()
     };
+    let event_time = match signal.status {
+        AlertStatus::Firing => signal.starts_at.clone(),
+        AlertStatus::Resolved => signal.ends_at.clone(),
+    };
+    let source_event_id = format!(
+        "{}:{}:{}",
+        identity,
+        match signal.status {
+            AlertStatus::Firing => "firing",
+            AlertStatus::Resolved => "resolved",
+        },
+        event_time
+    );
     IncidentSignal {
         correlation_id: identity.clone(),
         incident_id: format!("incident-{identity}"),
@@ -113,6 +140,8 @@ pub fn normalize(signal: AlertSignal) -> IncidentSignal {
         status: signal.status,
         labels: signal.labels,
         annotations: signal.annotations,
+        event_time,
+        source_event_id,
     }
 }
 

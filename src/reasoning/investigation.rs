@@ -752,6 +752,7 @@ impl ShadowInvestigator {
         self.journal.append(JournalEvent::IncidentOpened {
             incident_id: signal.incident_id.clone(),
             alert_name: signal.alert_name.clone(),
+            event_time: signal.event_time.clone(),
         })?;
         self.journal.append(JournalEvent::PhaseStarted {
             phase: Phase::Investigation,

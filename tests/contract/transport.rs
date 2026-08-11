@@ -84,6 +84,7 @@ async fn metrics_endpoint_requires_auth_and_exposes_fixed_aggregate_names() {
         .append(JournalEvent::IncidentOpened {
             incident_id: "private-id".to_owned(),
             alert_name: "ApiDown".to_owned(),
+            event_time: String::new(),
         })
         .expect("append incident");
     let metrics = MetricsSnapshot::default();
@@ -136,4 +137,21 @@ fn intake_rejects_other_routes_and_oversized_bodies() {
     // Then neither request reaches normalization.
     assert_eq!(wrong_route_result, Err(IntakeError::NotAllowed));
     assert_eq!(oversized_result, Err(IntakeError::BodyTooLarge));
+}
+
+#[test]
+fn intake_rejects_unknown_alert_fields_before_durable_admission() {
+    // Given an otherwise valid webhook containing an undeclared alert field.
+    let body = br#"{"alerts":[{"status":"firing","fingerprint":"fp-unknown","labels":{},"annotations":{},"secret":"must-not-cross-boundary"}]}"#;
+    let request = format!(
+        "POST /webhooks/alertmanager HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        std::str::from_utf8(body).expect("JSON is UTF-8")
+    );
+
+    // When the bounded parser validates the nested alert schema.
+    let result = AlertIntake::new(IntakeConfig::default()).parse_request(request.as_bytes());
+
+    // Then malformed source data is rejected before normalization or queueing.
+    assert_eq!(result, Err(IntakeError::Malformed));
 }
