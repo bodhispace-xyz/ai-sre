@@ -77,8 +77,12 @@ pub enum AlertStatus {
 /// Normalized signal handed to the incident workflow.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct IncidentSignal {
+    /// Alertmanager correlation key shared by all lifecycle episodes.
+    pub correlation_id: String,
     /// Stable identity shared by duplicate firing and recovery events.
     pub incident_id: String,
+    /// Monotonic lifecycle episode number for this correlation key.
+    pub episode: u64,
     /// Normalized alert name.
     pub alert_name: String,
     /// Lifecycle state of the signal.
@@ -102,7 +106,9 @@ pub fn normalize(signal: AlertSignal) -> IncidentSignal {
         signal.fingerprint.clone()
     };
     IncidentSignal {
+        correlation_id: identity.clone(),
         incident_id: format!("incident-{identity}"),
+        episode: 1,
         alert_name,
         status: signal.status,
         labels: signal.labels,

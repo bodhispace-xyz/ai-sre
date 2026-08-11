@@ -43,3 +43,52 @@ fn dispatcher_deduplicates_replayed_incident_signals() {
     assert_eq!(second, vec![DispatchOutcome::Deduplicated]);
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn dispatcher_recovers_and_starts_a_new_episode_after_recurrence() {
+    // Given one firing signal, its recovery, and a later firing recurrence.
+    let path = std::env::temp_dir().join(format!("ai-sre-lifecycle-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let store = JournalStore::open(&path).expect("journal");
+    let mut dispatcher = IncidentDispatcher::new(store);
+    let firing = AlertSignal {
+        status: AlertStatus::Firing,
+        fingerprint: "fp-lifecycle".to_owned(),
+        labels: BTreeMap::from([(String::from("alertname"), String::from("ApiDown"))]),
+        annotations: BTreeMap::new(),
+    };
+    let resolved = AlertSignal {
+        status: AlertStatus::Resolved,
+        ..firing.clone()
+    };
+
+    // When the lifecycle sequence is processed in order.
+    let first = normalize(firing);
+    let recovery = normalize(resolved.clone());
+    let recurrence = normalize(AlertSignal {
+        status: AlertStatus::Firing,
+        ..resolved
+    });
+    let first_id = first.incident_id.clone();
+    dispatcher
+        .process_new(IntakeBatch {
+            incidents: vec![first],
+        })
+        .expect("first firing");
+    dispatcher
+        .process_new(IntakeBatch {
+            incidents: vec![recovery],
+        })
+        .expect("recovery");
+    let next = dispatcher
+        .process_new(IntakeBatch {
+            incidents: vec![recurrence],
+        })
+        .expect("recurrence");
+
+    // Then recovery is accepted and recurrence receives a distinct episode ID.
+    assert_eq!(next.len(), 1);
+    assert_ne!(next[0].incident_id, first_id);
+    assert_eq!(next[0].episode, 2);
+    let _ = std::fs::remove_file(path);
+}
