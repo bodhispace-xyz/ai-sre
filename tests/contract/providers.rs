@@ -7,6 +7,7 @@ use ai_sre::adapters::llm::{
 };
 use ai_sre::reasoning::budget::{BudgetConfig, BudgetError, BudgetState, Reservation};
 use ai_sre::reasoning::contracts::{ContractError, DiagnosticReport, EvidenceRef};
+use ai_sre::reasoning::coordinator::{CoordinatorError, ReasoningConfig, ReasoningRun, RunStatus};
 use ai_sre::reasoning::router::{ProviderKind, ProviderOrder, next_provider, next_provider_in};
 
 #[test]
@@ -235,4 +236,66 @@ fn budget_reservation_is_atomic_and_rejects_overcommitment() {
     // Then rejection leaves every accounting dimension unchanged.
     assert_eq!(rejected, Err(BudgetError::Tokens));
     assert_eq!(state.totals(), before);
+}
+
+#[test]
+fn coordinator_reserves_before_each_restart_and_ends_in_baseline() {
+    // Given a run configured for two provider attempts followed by baseline.
+    let config = ReasoningConfig {
+        provider_order: ProviderOrder {
+            providers: vec![ProviderKind::OpenAi, ProviderKind::Deterministic],
+        },
+        budget: BudgetConfig {
+            max_provider_calls: 2,
+            ..BudgetConfig::default()
+        },
+    };
+    let mut run = ReasoningRun::new(config).expect("valid run configuration");
+    let reservation = Reservation {
+        provider_calls: 1,
+        tokens: 100,
+        evidence_queries: 1,
+        cost_micro_usd: 0,
+    };
+
+    // When OpenAI fails, the coordinator restarts from the same run-scoped board.
+    assert_eq!(run.admit(reservation), Ok(Some(ProviderKind::OpenAi)));
+    run.fail(ProviderKind::OpenAi).expect("active provider");
+
+    // Then the configured deterministic provider is admitted and can terminate the run.
+    assert_eq!(
+        run.admit(reservation),
+        Ok(Some(ProviderKind::Deterministic))
+    );
+    assert_eq!(
+        run.succeed(ProviderKind::Deterministic),
+        Ok(RunStatus::Succeeded(ProviderKind::Deterministic))
+    );
+    assert_eq!(
+        run.status(),
+        Some(RunStatus::Succeeded(ProviderKind::Deterministic))
+    );
+}
+
+#[test]
+fn coordinator_rejects_wrong_completion_without_changing_active_run() {
+    // Given an active OpenAI run.
+    let mut run = ReasoningRun::new(ReasoningConfig::default()).expect("default config");
+    let reservation = Reservation {
+        provider_calls: 1,
+        tokens: 100,
+        evidence_queries: 1,
+        cost_micro_usd: 0,
+    };
+    assert_eq!(run.admit(reservation), Ok(Some(ProviderKind::OpenAi)));
+
+    // When another provider falsely reports completion.
+    let result = run.succeed(ProviderKind::Gemini);
+
+    // Then the coordinator rejects it and keeps the active run intact.
+    assert_eq!(result, Err(CoordinatorError::WrongProvider));
+    assert_eq!(
+        run.succeed(ProviderKind::OpenAi),
+        Ok(RunStatus::Succeeded(ProviderKind::OpenAi))
+    );
 }
