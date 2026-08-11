@@ -3,7 +3,11 @@
 //! This module produces literal argument vectors. It does not invoke a shell,
 //! accept arbitrary subcommands, or expose Grafana's generic API surface.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use thiserror::Error;
 use tokio::{
@@ -63,7 +67,11 @@ pub struct GcxRunner {
     max_output_bytes: usize,
     max_query_bytes: usize,
     concurrency: Arc<Semaphore>,
+    global_concurrency: Arc<Semaphore>,
 }
+
+const GLOBAL_GCX_CONCURRENCY_LIMIT: usize = 64;
+static GLOBAL_GCX_CONCURRENCY: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 impl GcxRunner {
     /// Creates a runner for a pinned `gcx` binary.
@@ -74,6 +82,7 @@ impl GcxRunner {
             max_output_bytes,
             max_query_bytes: 4_096,
             concurrency: Arc::new(Semaphore::new(4)),
+            global_concurrency: global_concurrency(),
         }
     }
 
@@ -92,6 +101,12 @@ impl GcxRunner {
     /// Executes one typed query without invoking a shell.
     pub async fn run(&self, query: &GcxQuery) -> Result<GcxOutput, GcxRunError> {
         query.validate(self.max_query_bytes)?;
+        let _global_permit = self
+            .global_concurrency
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| GcxRunError::ConcurrencyUnavailable)?;
         let _permit = self
             .concurrency
             .clone()
@@ -145,6 +160,12 @@ impl GcxRunner {
         .await
         .map_err(|_| GcxRunError::TimedOut)?
     }
+}
+
+fn global_concurrency() -> Arc<Semaphore> {
+    GLOBAL_GCX_CONCURRENCY
+        .get_or_init(|| Arc::new(Semaphore::new(GLOBAL_GCX_CONCURRENCY_LIMIT)))
+        .clone()
 }
 
 async fn read_bounded<R>(reader: R, max_output_bytes: usize) -> Result<Vec<u8>, GcxRunError>
