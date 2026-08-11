@@ -1,8 +1,10 @@
 //! Gemini transport and response normalization at the adapter boundary.
 
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 
 use crate::reasoning::contracts::{ContractError, DiagnosticReport};
+use crate::reasoning::coordinator::{AttemptFacts, FailureClass};
 
 use super::{ApiKey, MAX_RESPONSE_BYTES, ProviderFailure, REQUEST_TIMEOUT, classify_status};
 
@@ -67,6 +69,22 @@ impl GeminiClient {
         self.normalize_report(body)
     }
 
+    /// Executes one Gemini attempt in the core runtime result shape.
+    pub async fn complete_for_runtime(
+        &self,
+        prompt: &str,
+    ) -> Result<(DiagnosticReport, AttemptFacts), FailureClass> {
+        let started = Instant::now();
+        let report = self.complete(prompt).await.map_err(map_failure)?;
+        Ok((
+            report,
+            AttemptFacts {
+                elapsed_ms: started.elapsed().as_millis() as u64,
+                ..AttemptFacts::default()
+            },
+        ))
+    }
+
     /// Converts Gemini's candidate text into the provider-neutral report.
     pub fn normalize_report(&self, response: &str) -> Result<DiagnosticReport, ProviderFailure> {
         let envelope = serde_json::from_str::<GeminiResponse>(response)
@@ -122,5 +140,14 @@ fn contract_failure(error: ContractError) -> ProviderFailure {
         ContractError::UnknownEvidence(_)
         | ContractError::EmptySummary
         | ContractError::MissingEvidence => ProviderFailure::MalformedResponse,
+    }
+}
+
+fn map_failure(failure: ProviderFailure) -> FailureClass {
+    match failure {
+        ProviderFailure::AuthenticationRequired => FailureClass::AuthenticationRequired,
+        ProviderFailure::RateLimited => FailureClass::RateLimited,
+        ProviderFailure::TemporarilyUnavailable => FailureClass::TemporarilyUnavailable,
+        ProviderFailure::MalformedResponse => FailureClass::MalformedResponse,
     }
 }
