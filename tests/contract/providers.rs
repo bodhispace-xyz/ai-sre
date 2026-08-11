@@ -16,6 +16,10 @@ use ai_sre::reasoning::journal::{IncidentJournal, JournalEvent, Phase, attempt_e
 use ai_sre::reasoning::recorded::{RecordedAttempt, RecordedOutcome, RecordedProvider};
 use ai_sre::reasoning::router::{ProviderKind, ProviderOrder, next_provider, next_provider_in};
 use ai_sre::reasoning::runtime::IncidentRuntime;
+use ai_sre::{
+    bootstrap,
+    config::{AppConfig, ConfigError},
+};
 
 #[test]
 fn api_keys_are_redacted_and_provider_clients_normalize_common_reports() {
@@ -653,4 +657,33 @@ fn runtime_stops_fallback_when_the_incident_call_budget_is_exhausted() {
     );
     assert_eq!(runtime.journal().project().provider_attempts, 2);
     assert_eq!(runtime.journal().project().terminal_provider, None);
+}
+
+#[test]
+fn bootstrap_rejects_zero_process_limits_before_assembling_adapters() {
+    // Given deployment configuration with an unsafe zero `gcx` timeout.
+    let config = AppConfig {
+        gcx_timeout_secs: 0,
+        ..AppConfig::default()
+    };
+
+    // When startup validation runs.
+    let result = config.validate();
+
+    // Then it fails closed without constructing external clients.
+    assert_eq!(result, Err(ConfigError::ZeroLimit));
+    assert!(bootstrap::build(config).is_err());
+}
+
+#[test]
+fn bootstrap_builds_valid_non_secret_dependencies() {
+    // Given the default versioned policy and resource limits.
+    let config = AppConfig::default();
+
+    // When bootstrap validates and assembles the application.
+    let application = bootstrap::build(config).expect("default configuration");
+
+    // Then core runtime and read-only adapter boundaries are available.
+    assert!(application.runtime.journal().entries().is_empty());
+    assert!(format!("{:?}", application.openai_oauth).contains("OpenAiOAuth"));
 }

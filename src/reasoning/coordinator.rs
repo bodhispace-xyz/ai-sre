@@ -14,7 +14,7 @@ use super::{
 };
 
 /// Configurable inputs for one incident reasoning run.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReasoningConfig {
     /// Provider fallback order for complete restarts.
     pub provider_order: ProviderOrder,
