@@ -9,7 +9,9 @@ use tokio::time::timeout;
 
 use thiserror::Error;
 
-use crate::adapters::grafana::context::{ContextBudget, ContextError, GrafanaContext};
+use crate::adapters::grafana::context::{
+    ContextBudget, ContextError, GrafanaContext, ReadOnlyRequest,
+};
 
 use super::{
     budget::Reservation,
@@ -114,14 +116,14 @@ pub async fn investigate_live(
     let remaining = runtime.remaining().ok_or(InvestigationError::Deadline)?;
     timeout(
         remaining,
-        grafana.logs_with_budget(&mut collected, &mut context_budget, queries.logs),
-    )
-    .await
-    .map_err(|_| InvestigationError::Deadline)??;
-    let remaining = runtime.remaining().ok_or(InvestigationError::Deadline)?;
-    timeout(
-        remaining,
-        grafana.metrics_with_budget(&mut collected, &mut context_budget, queries.metrics),
+        grafana.execute_requests(
+            &mut collected,
+            &mut context_budget,
+            &[
+                ReadOnlyRequest::Logs(queries.logs),
+                ReadOnlyRequest::Metrics(queries.metrics),
+            ],
+        ),
     )
     .await
     .map_err(|_| InvestigationError::Deadline)??;

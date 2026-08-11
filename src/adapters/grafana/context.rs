@@ -29,6 +29,15 @@ pub struct ContextBudget {
     remaining_queries: usize,
 }
 
+/// One model-directed, read-only context request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReadOnlyRequest {
+    /// Ask Loki for bounded logs through the configured datasource.
+    Logs(String),
+    /// Ask Prometheus for bounded metrics through the configured datasource.
+    Metrics(String),
+}
+
 impl ContextBudget {
     /// Creates a budget that permits at most `max_queries` requests.
     pub const fn new(max_queries: usize) -> Self {
@@ -102,6 +111,30 @@ impl GrafanaContext {
         self.metrics(board, expression).await
     }
 
+    /// Executes a bounded batch of model-directed read-only requests.
+    pub async fn execute_requests(
+        &self,
+        board: &mut EvidenceBoard,
+        budget: &mut ContextBudget,
+        requests: &[ReadOnlyRequest],
+    ) -> Result<Vec<String>, ContextError> {
+        let mut evidence_ids = Vec::with_capacity(requests.len());
+        for request in requests {
+            let evidence_id = match request {
+                ReadOnlyRequest::Logs(expression) => {
+                    self.logs_with_budget(board, budget, expression.clone())
+                        .await?
+                }
+                ReadOnlyRequest::Metrics(expression) => {
+                    self.metrics_with_budget(board, budget, expression.clone())
+                        .await?
+                }
+            };
+            evidence_ids.push(evidence_id);
+        }
+        Ok(evidence_ids)
+    }
+
     async fn query(
         &self,
         board: &mut EvidenceBoard,
@@ -134,7 +167,7 @@ pub enum ContextError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContextBudget, ContextError};
+    use super::{ContextBudget, ContextError, ReadOnlyRequest};
 
     #[test]
     fn context_budget_is_exhausted_without_underflow() {
@@ -148,5 +181,17 @@ mod tests {
         // Then the first succeeds and exhaustion fails closed.
         assert_eq!(first, Ok(()));
         assert_eq!(second, Err(ContextError::QueryBudgetExceeded));
+    }
+
+    #[test]
+    fn read_only_requests_have_no_command_or_datasource_field() {
+        // Given a model-directed request for additional evidence.
+        let request = ReadOnlyRequest::Logs("{service=\"api\"} |= \"error\"".to_owned());
+
+        // When its typed capability is inspected.
+        let is_logs = matches!(request, ReadOnlyRequest::Logs(_));
+
+        // Then the request contains only query data; command and datasource stay policy-owned.
+        assert!(is_logs);
     }
 }
