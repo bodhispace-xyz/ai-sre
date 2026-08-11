@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::reasoning::contracts::{ContractError, DiagnosticReport};
 
-use super::{ApiKey, ProviderFailure, classify_status};
+use super::{ApiKey, MAX_RESPONSE_BYTES, ProviderFailure, REQUEST_TIMEOUT, classify_status};
 
 const DEFAULT_ENDPOINT: &str =
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
@@ -23,7 +23,10 @@ impl GeminiClient {
         Self {
             _key: ApiKey::new(api_key),
             endpoint: DEFAULT_ENDPOINT.to_owned(),
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(REQUEST_TIMEOUT)
+                .build()
+                .expect("default HTTP client configuration must be valid"),
         }
     }
 
@@ -54,10 +57,14 @@ impl GeminiClient {
         }
 
         let body = response
-            .text()
+            .bytes()
             .await
             .map_err(|_| ProviderFailure::TemporarilyUnavailable)?;
-        self.normalize_report(&body)
+        if body.len() > MAX_RESPONSE_BYTES {
+            return Err(ProviderFailure::MalformedResponse);
+        }
+        let body = std::str::from_utf8(&body).map_err(|_| ProviderFailure::MalformedResponse)?;
+        self.normalize_report(body)
     }
 
     /// Converts Gemini's candidate text into the provider-neutral report.

@@ -4,6 +4,13 @@
 //! and redacted credentials are shared here.
 
 use std::fmt;
+use std::time::Duration;
+
+/// Maximum provider response accepted by an adapter before normalization.
+pub(crate) const MAX_RESPONSE_BYTES: usize = 1_048_576;
+
+/// Standard timeout for one provider request.
+pub(crate) const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// An API key that never appears in debug output.
 #[derive(Clone, PartialEq, Eq)]
