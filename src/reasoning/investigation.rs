@@ -615,6 +615,9 @@ fn tool_name(tool: &super::tools::ContextTool) -> &'static str {
     match tool {
         super::tools::ContextTool::QueryLogs => "query_logs",
         super::tools::ContextTool::QueryMetrics => "query_metrics",
+        super::tools::ContextTool::ReadDesiredState => "read_desired_state",
+        super::tools::ContextTool::ReadDeploymentHistory => "read_deployment_history",
+        super::tools::ContextTool::ReadHealth => "read_health",
     }
 }
 
@@ -647,7 +650,7 @@ async fn provider_turn<'a>(
 
 fn build_prompt(signal: &IncidentSignal, runtime: &IncidentRuntime) -> String {
     let mut prompt = format!(
-        "Diagnose incident {} (alert {}). Return strict JSON with summary and evidence citations.\nTools available: query_logs(query), query_metrics(query). These are read-only, bounded, and datasource-owned.\nRemaining configured evidence-query ceiling: {}. Do not execute commands, write Grafana state, or request credentials.\n",
+        "Diagnose incident {} (alert {}). Return strict JSON with summary and evidence citations.\nTools available: query_logs(query), query_metrics(query), read_desired_state(query), read_deployment_history(query), read_health(query). These are read-only, bounded, and server-policy-owned.\nRemaining configured evidence-query ceiling: {}. Do not execute commands, write state, or request credentials.\n",
         signal.incident_id,
         signal.alert_name,
         runtime

@@ -10,6 +10,7 @@ use thiserror::Error;
 use tokio::{io::AsyncReadExt, process::Command, sync::Semaphore, time};
 
 use crate::reasoning::evidence::{EvidenceBoard, EvidenceError, EvidenceSource};
+use crate::reasoning::tools::{ContextTool, ToolCall, ToolResult, ToolResultClass};
 
 const MAX_SELECTOR_BYTES: usize = 512;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
@@ -237,6 +238,53 @@ impl ReadOnlyContext {
             .ok_or(ContextError::InvalidPlan)?;
         let plan = health_plan(&self.config.health_binary, args, alias)?;
         self.runner.execute(board, &plan).await
+    }
+
+    /// Executes one Git or health tool call using only server-owned selectors.
+    pub async fn execute_tool(&self, board: &mut EvidenceBoard, call: &ToolCall) -> ToolResult {
+        let outcome = match call.tool {
+            ContextTool::ReadDesiredState => {
+                let Some((revision, path)) = call.query.split_once('\n') else {
+                    return denied_result(call);
+                };
+                self.desired_state(board, revision, path).await
+            }
+            ContextTool::ReadDeploymentHistory => {
+                self.deployment_history(board, &call.query, 20).await
+            }
+            ContextTool::ReadHealth => self.health(board, call.query.trim()).await,
+            ContextTool::QueryLogs | ContextTool::QueryMetrics => return denied_result(call),
+        };
+        match outcome {
+            Ok(evidence_id) => ToolResult {
+                call_id: call.call_id.clone(),
+                class: ToolResultClass::Succeeded,
+                evidence_id: Some(evidence_id),
+                detail: "bounded evidence committed".to_owned(),
+            },
+            Err(ContextError::InvalidPlan | ContextError::Evidence(_)) => denied_result(call),
+            Err(ContextError::OutputLimitExceeded) => ToolResult {
+                call_id: call.call_id.clone(),
+                class: ToolResultClass::Truncated,
+                evidence_id: None,
+                detail: "context output exceeded its bound".to_owned(),
+            },
+            Err(_) => ToolResult {
+                call_id: call.call_id.clone(),
+                class: ToolResultClass::Unavailable,
+                evidence_id: None,
+                detail: "context backend unavailable".to_owned(),
+            },
+        }
+    }
+}
+
+fn denied_result(call: &ToolCall) -> ToolResult {
+    ToolResult {
+        call_id: call.call_id.clone(),
+        class: ToolResultClass::Denied,
+        evidence_id: None,
+        detail: "context request rejected by server policy".to_owned(),
     }
 }
 

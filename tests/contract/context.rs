@@ -8,6 +8,7 @@ use ai_sre::{
         git_desired_state, health_plan,
     },
     reasoning::evidence::{EvidenceBoard, EvidenceSource},
+    reasoning::tools::{ContextTool, ToolCall, ToolResultClass, parse_tool_call},
 };
 
 fn fixture_script(body: &str) -> PathBuf {
@@ -107,4 +108,55 @@ async fn context_facade_keeps_health_aliases_and_git_repository_server_owned() {
     assert!(known.is_ok());
     assert_eq!(unknown, Err(ContextError::InvalidPlan));
     assert_eq!(board.records()[0].source, EvidenceSource::Health);
+}
+
+#[test]
+fn provider_names_map_to_the_read_only_context_capabilities() {
+    // Given the three non-Grafana context tool names exposed to providers.
+    let desired = parse_tool_call("d", "read_desired_state", r#"{"query":"HEAD\napi.yml"}"#);
+    let history = parse_tool_call("h", "read_deployment_history", r#"{"query":"api.yml"}"#);
+    let health = parse_tool_call("c", "read_health", r#"{"query":"api"}"#);
+
+    // When provider metadata crosses the strict tool parser.
+    // Then each name maps to an allowlisted capability with no command fields.
+    assert_eq!(
+        desired.expect("desired").tool,
+        ContextTool::ReadDesiredState
+    );
+    assert_eq!(
+        history.expect("history").tool,
+        ContextTool::ReadDeploymentHistory
+    );
+    assert_eq!(health.expect("health").tool, ContextTool::ReadHealth);
+}
+
+#[tokio::test]
+async fn context_tool_execution_rejects_grafana_capabilities_at_the_wrong_boundary() {
+    // Given a server-owned context facade and a Grafana query routed to it accidentally.
+    let binary = fixture_script("printf 'unused'");
+    let context = ReadOnlyContext::new(
+        ReadOnlyRunner::new(Duration::from_secs(1), 128, 1),
+        ReadOnlyContextConfig {
+            git_binary: binary.clone(),
+            git_repository: "/srv/repo".to_owned(),
+            health_binary: binary,
+            health_commands: BTreeMap::new(),
+        },
+    )
+    .expect("valid context config");
+    let mut board = EvidenceBoard::default();
+    let result = context
+        .execute_tool(
+            &mut board,
+            &ToolCall {
+                call_id: "logs".to_owned(),
+                tool: ContextTool::QueryLogs,
+                query: "{app=\"api\"}".to_owned(),
+            },
+        )
+        .await;
+
+    // Then the adapter refuses cross-capability dispatch without process execution.
+    assert_eq!(result.class, ToolResultClass::Denied);
+    assert!(board.records().is_empty());
 }
