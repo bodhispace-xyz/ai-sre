@@ -11,6 +11,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use serde::Deserialize;
 use thiserror::Error;
 use tokio::{
     net::TcpListener,
@@ -78,9 +79,17 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
     let worker_metrics = metrics.clone();
     let (worker_failed, worker_failed_rx) = oneshot::channel();
     let mut dispatcher = IncidentDispatcher::new(JournalStore::open(journal_path)?);
-    let gemini = gated_api_provider("GEMINI_API_KEY", "GEMINI_GATE", "GEMINI_PRICE_CATALOG")
-        .map(GeminiClient::new);
+    let gemini = gated_api_provider(
+        "gemini",
+        "gemini-2.5-flash",
+        "GEMINI_API_KEY",
+        "GEMINI_GATE",
+        "GEMINI_PRICE_CATALOG",
+    )
+    .map(GeminiClient::new);
     let deepseek = gated_api_provider(
+        "deepseek",
+        "deepseek-chat",
         "DEEPSEEK_API_KEY",
         "DEEPSEEK_GATE",
         "DEEPSEEK_PRICE_CATALOG",
@@ -251,13 +260,44 @@ fn now_ms() -> u64 {
         .unwrap_or_default()
 }
 
-fn gated_api_provider(key: &str, gate: &str, price_catalog: &str) -> Option<String> {
+fn gated_api_provider(
+    provider: &str,
+    model: &str,
+    key: &str,
+    gate: &str,
+    price_catalog: &str,
+) -> Option<String> {
     let api_key = env::var(key).ok()?;
-    (env::var(gate).ok().as_deref() == Some("accepted"))
-        .then(|| env::var(price_catalog).ok())
-        .flatten()?;
+    if env::var(gate).ok().as_deref() != Some("accepted") {
+        return None;
+    }
+    let catalog = env::var(price_catalog).ok()?;
+    if !valid_price_catalog(&catalog, provider, model, now_ms()) {
+        return None;
+    }
     global_cost_limits()?;
     Some(api_key)
+}
+
+#[derive(Debug, Deserialize)]
+struct PriceCatalog {
+    provider: String,
+    model: String,
+    version: String,
+    valid_until_ms: u64,
+    micro_usd_per_1k_tokens: u64,
+}
+
+fn valid_price_catalog(raw: &str, provider: &str, model: &str, now_ms: u64) -> bool {
+    let Ok(catalog) = serde_json::from_str::<PriceCatalog>(raw) else {
+        return false;
+    };
+    catalog.provider == provider
+        && catalog.model == model
+        && !catalog.model.trim().is_empty()
+        && !catalog.version.trim().is_empty()
+        && catalog.valid_until_ms > now_ms
+        && catalog.micro_usd_per_1k_tokens > 0
 }
 
 fn global_cost_limits() -> Option<(u64, u64, String, String)> {
@@ -312,4 +352,33 @@ pub fn listener_address() -> Result<SocketAddr, ApplicationError> {
         .unwrap_or_else(|_| "127.0.0.1:8080".to_owned())
         .parse()
         .map_err(ApplicationError::Address)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_price_catalog;
+
+    #[test]
+    fn price_catalog_requires_provider_identity_price_and_freshness() {
+        // Given a catalog with explicit provider/model/version and a future expiry.
+        let catalog = r#"{
+            "provider":"gemini",
+            "model":"gemini-2.5-flash",
+            "version":"2026-08-11",
+            "valid_until_ms":2000,
+            "micro_usd_per_1k_tokens":40
+        }"#;
+
+        // When the admission gate validates it against the current time.
+        let accepted = valid_price_catalog(catalog, "gemini", "gemini-2.5-flash", 1000);
+        let wrong_provider = valid_price_catalog(catalog, "deepseek", "gemini-2.5-flash", 1000);
+        let wrong_model = valid_price_catalog(catalog, "gemini", "gemini-2.0-flash", 1000);
+        let expired = valid_price_catalog(catalog, "gemini", "gemini-2.5-flash", 3000);
+
+        // Then only the fresh, provider-matching catalog is accepted.
+        assert!(accepted);
+        assert!(!wrong_provider);
+        assert!(!wrong_model);
+        assert!(!expired);
+    }
 }
