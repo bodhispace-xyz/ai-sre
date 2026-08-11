@@ -6,6 +6,7 @@ use ai_sre::adapters::llm::{
     ApiKey, ProviderFailure, deepseek::DeepSeekClient, gemini::GeminiClient,
 };
 use ai_sre::reasoning::contracts::{ContractError, DiagnosticReport, EvidenceRef};
+use ai_sre::reasoning::router::{ProviderKind, next_provider};
 
 #[test]
 fn api_keys_are_redacted_and_provider_clients_normalize_common_reports() {
@@ -42,6 +43,34 @@ fn malformed_gemini_and_deepseek_envelopes_fail_without_vendor_details() {
     // Then both expose only the shared safe failure classification.
     assert_eq!(gemini_result, Err(ProviderFailure::MalformedResponse));
     assert_eq!(deepseek_result, Err(ProviderFailure::MalformedResponse));
+}
+
+#[test]
+fn failover_router_advances_without_repeating_a_provider() {
+    // Given a run that already attempted OpenAI and Gemini.
+    let attempted = BTreeSet::from([ProviderKind::OpenAi, ProviderKind::Gemini]);
+
+    // When the pure router chooses the next provider.
+    let next = next_provider(&attempted);
+
+    // Then it selects DeepSeek, preserving the fixed complete-run order.
+    assert_eq!(next, Some(ProviderKind::DeepSeek));
+}
+
+#[test]
+fn failover_router_ends_with_deterministic_baseline() {
+    // Given a run where all model providers have failed.
+    let attempted = BTreeSet::from([
+        ProviderKind::OpenAi,
+        ProviderKind::Gemini,
+        ProviderKind::DeepSeek,
+    ]);
+
+    // When the router is asked for the final fallback.
+    let next = next_provider(&attempted);
+
+    // Then it returns the deterministic baseline.
+    assert_eq!(next, Some(ProviderKind::Deterministic));
 }
 
 #[test]

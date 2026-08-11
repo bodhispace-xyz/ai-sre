@@ -1,10 +1,10 @@
 //! DeepSeek transport and response normalization at the adapter boundary.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::reasoning::contracts::{ContractError, DiagnosticReport};
 
-use super::{ApiKey, ProviderFailure};
+use super::{ApiKey, ProviderFailure, classify_status};
 
 const DEFAULT_ENDPOINT: &str = "https://api.deepseek.com/chat/completions";
 
@@ -13,6 +13,7 @@ const DEFAULT_ENDPOINT: &str = "https://api.deepseek.com/chat/completions";
 pub struct DeepSeekClient {
     _key: ApiKey,
     endpoint: String,
+    client: reqwest::Client,
 }
 
 impl DeepSeekClient {
@@ -21,12 +22,44 @@ impl DeepSeekClient {
         Self {
             _key: ApiKey::new(api_key),
             endpoint: DEFAULT_ENDPOINT.to_owned(),
+            client: reqwest::Client::new(),
         }
     }
 
     /// Returns the configured endpoint for the transport shell.
     pub fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    /// Sends one bounded prompt and normalizes the provider response.
+    pub async fn complete(&self, prompt: &str) -> Result<DiagnosticReport, ProviderFailure> {
+        let response = self
+            .client
+            .post(&self.endpoint)
+            .bearer_auth(self._key.value())
+            .json(&DeepSeekRequest {
+                model: "deepseek-chat",
+                messages: vec![DeepSeekMessageRequest {
+                    role: "user",
+                    content: prompt,
+                }],
+                response_format: DeepSeekResponseFormat {
+                    response_type: "json_object",
+                },
+            })
+            .send()
+            .await
+            .map_err(|_| ProviderFailure::TemporarilyUnavailable)?;
+
+        if !response.status().is_success() {
+            return Err(classify_status(response.status()));
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|_| ProviderFailure::TemporarilyUnavailable)?;
+        self.normalize_report(&body)
     }
 
     /// Converts DeepSeek's choice text into the provider-neutral report.
@@ -55,6 +88,25 @@ struct DeepSeekChoice {
 #[derive(Debug, Deserialize)]
 struct DeepSeekMessage {
     content: String,
+}
+
+#[derive(Serialize)]
+struct DeepSeekRequest<'a> {
+    model: &'a str,
+    messages: Vec<DeepSeekMessageRequest<'a>>,
+    response_format: DeepSeekResponseFormat<'a>,
+}
+
+#[derive(Serialize)]
+struct DeepSeekMessageRequest<'a> {
+    role: &'a str,
+    content: &'a str,
+}
+
+#[derive(Serialize)]
+struct DeepSeekResponseFormat<'a> {
+    #[serde(rename = "type")]
+    response_type: &'a str,
 }
 
 fn contract_failure(error: ContractError) -> ProviderFailure {

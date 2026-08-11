@@ -2,6 +2,7 @@
 
 mod api;
 
+pub(crate) use api::classify_status;
 /// Shared safe classifications for API-backed provider adapters.
 pub use api::{ApiKey, ProviderFailure};
 

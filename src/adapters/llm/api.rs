@@ -14,6 +14,11 @@ impl ApiKey {
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
+
+    /// Exposes the secret only to an adapter-owned request builder.
+    pub(crate) fn value(&self) -> &str {
+        &self.0
+    }
 }
 
 impl fmt::Debug for ApiKey {
@@ -33,4 +38,13 @@ pub enum ProviderFailure {
     TemporarilyUnavailable,
     /// The provider response did not match the expected typed contract.
     MalformedResponse,
+}
+
+/// Converts an HTTP status into a secret-safe provider classification.
+pub(crate) fn classify_status(status: reqwest::StatusCode) -> ProviderFailure {
+    match status.as_u16() {
+        401 | 403 => ProviderFailure::AuthenticationRequired,
+        429 => ProviderFailure::RateLimited,
+        _ => ProviderFailure::TemporarilyUnavailable,
+    }
 }

@@ -1,10 +1,10 @@
 //! Gemini transport and response normalization at the adapter boundary.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::reasoning::contracts::{ContractError, DiagnosticReport};
 
-use super::{ApiKey, ProviderFailure};
+use super::{ApiKey, ProviderFailure, classify_status};
 
 const DEFAULT_ENDPOINT: &str =
     "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent";
@@ -14,6 +14,7 @@ const DEFAULT_ENDPOINT: &str =
 pub struct GeminiClient {
     _key: ApiKey,
     endpoint: String,
+    client: reqwest::Client,
 }
 
 impl GeminiClient {
@@ -22,12 +23,41 @@ impl GeminiClient {
         Self {
             _key: ApiKey::new(api_key),
             endpoint: DEFAULT_ENDPOINT.to_owned(),
+            client: reqwest::Client::new(),
         }
     }
 
     /// Returns the configured endpoint for the transport shell.
     pub fn endpoint(&self) -> &str {
         &self.endpoint
+    }
+
+    /// Sends one bounded prompt and normalizes the provider response.
+    pub async fn complete(&self, prompt: &str) -> Result<DiagnosticReport, ProviderFailure> {
+        let response = self
+            .client
+            .post(&self.endpoint)
+            .query(&[("key", self._key.value())])
+            .json(&GeminiRequest {
+                contents: vec![GeminiContentRequest {
+                    parts: vec![GeminiPartRequest {
+                        text: prompt.to_owned(),
+                    }],
+                }],
+            })
+            .send()
+            .await
+            .map_err(|_| ProviderFailure::TemporarilyUnavailable)?;
+
+        if !response.status().is_success() {
+            return Err(classify_status(response.status()));
+        }
+
+        let body = response
+            .text()
+            .await
+            .map_err(|_| ProviderFailure::TemporarilyUnavailable)?;
+        self.normalize_report(&body)
     }
 
     /// Converts Gemini's candidate text into the provider-neutral report.
@@ -61,6 +91,21 @@ struct GeminiContent {
 
 #[derive(Debug, Deserialize)]
 struct GeminiPart {
+    text: String,
+}
+
+#[derive(Serialize)]
+struct GeminiRequest {
+    contents: Vec<GeminiContentRequest>,
+}
+
+#[derive(Serialize)]
+struct GeminiContentRequest {
+    parts: Vec<GeminiPartRequest>,
+}
+
+#[derive(Serialize)]
+struct GeminiPartRequest {
     text: String,
 }
 
