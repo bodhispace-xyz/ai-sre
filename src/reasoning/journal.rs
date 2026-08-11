@@ -24,6 +24,15 @@ pub enum Phase {
 /// Raw append-only fact for an incident.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JournalEvent {
+    /// Records an evidence-board commit without storing credentials.
+    EvidenceCommitted {
+        /// Stable evidence identifier.
+        evidence_id: String,
+        /// Source capability that produced the record.
+        source: super::evidence::EvidenceSource,
+        /// Monotonic commit timestamp in milliseconds.
+        at_ms: u64,
+    },
     /// Marks the beginning of a phase at an injected monotonic timestamp.
     PhaseStarted {
         /// Phase that started.
@@ -85,6 +94,7 @@ impl IncidentJournal {
         ];
         for entry in &self.entries {
             match &entry.event {
+                JournalEvent::EvidenceCommitted { .. } => {}
                 JournalEvent::PhaseStarted { phase, at_ms } => {
                     if let Some(slot) = phase_starts.iter_mut().find(|(item, _)| item == phase) {
                         slot.1 = Some(*at_ms);

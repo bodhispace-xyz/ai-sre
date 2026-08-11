@@ -14,6 +14,7 @@ use ai_sre::reasoning::coordinator::{
 use ai_sre::reasoning::evidence::{EvidenceBoard, EvidenceError, EvidenceSource};
 use ai_sre::reasoning::journal::{IncidentJournal, JournalEvent, Phase, attempt_event};
 use ai_sre::reasoning::router::{ProviderKind, ProviderOrder, next_provider, next_provider_in};
+use ai_sre::reasoning::runtime::IncidentRuntime;
 
 #[test]
 fn api_keys_are_redacted_and_provider_clients_normalize_common_reports() {
@@ -408,4 +409,55 @@ fn evidence_board_assigns_stable_ids_and_rejects_empty_tool_output() {
     assert_eq!(empty, Err(EvidenceError::EmptyPayload));
     assert_eq!(board.records().len(), 1);
     assert_eq!(board.records()[0].evidence_id, "evidence-0001");
+}
+
+#[test]
+fn incident_runtime_emits_evidence_attempt_and_terminal_journal_facts() {
+    // Given a runtime with a single deterministic provider path.
+    let config = ReasoningConfig {
+        provider_order: ProviderOrder {
+            providers: vec![ProviderKind::Deterministic],
+        },
+        budget: BudgetConfig::default(),
+    };
+    let mut runtime = IncidentRuntime::new(config).expect("runtime config");
+
+    // When evidence is committed, the provider succeeds, and the run closes.
+    assert_eq!(
+        runtime.commit_evidence(
+            EvidenceSource::GrafanaLogs,
+            "{app=\"api\"}",
+            b"log line".to_vec(),
+            10,
+        ),
+        Ok("evidence-0001".to_owned())
+    );
+    let reservation = Reservation {
+        provider_calls: 1,
+        tokens: 10,
+        evidence_queries: 1,
+        cost_micro_usd: 0,
+    };
+    assert_eq!(
+        runtime.admit_provider(reservation, 20),
+        Ok(Some(ProviderKind::Deterministic))
+    );
+    assert_eq!(
+        runtime.succeed_provider(
+            ProviderKind::Deterministic,
+            AttemptFacts {
+                elapsed_ms: 15,
+                tokens: None,
+                evidence_queries: 1,
+                cost_micro_usd: None,
+            },
+            40,
+        ),
+        Ok(RunStatus::Succeeded(ProviderKind::Deterministic))
+    );
+
+    // Then replay sees all boundary facts and preserves unknown cost.
+    assert_eq!(runtime.evidence().records().len(), 1);
+    assert_eq!(runtime.journal().entries().len(), 5);
+    assert_eq!(runtime.journal().project().unknown_cost_attempts, 1);
 }
