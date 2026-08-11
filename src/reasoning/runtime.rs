@@ -125,6 +125,27 @@ impl IncidentRuntime {
         Ok(status)
     }
 
+    /// Accepts a validated provider report and records it as the terminal result.
+    pub fn succeed_provider_with_report(
+        &mut self,
+        provider: ProviderKind,
+        report: DiagnosticReport,
+        facts: AttemptFacts,
+        at_ms: u64,
+    ) -> Result<RunStatus, RuntimeError> {
+        let evidence_ids = self
+            .evidence
+            .records()
+            .iter()
+            .map(|record| record.evidence_id.clone())
+            .collect::<BTreeSet<_>>();
+        report
+            .validate_against(&evidence_ids)
+            .map_err(|_| RuntimeError::Evidence(EvidenceError::EmptyPayload))?;
+        self.last_report = Some(report);
+        self.succeed_provider(provider, facts, at_ms)
+    }
+
     /// Executes a complete scripted fallback run for contract and shadow tests.
     ///
     /// Each provider starts from the same immutable evidence-board view; a

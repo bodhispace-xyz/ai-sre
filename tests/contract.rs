@@ -29,3 +29,6 @@ mod config;
 
 #[path = "contract/dispatcher.rs"]
 mod dispatcher;
+
+#[path = "contract/live.rs"]
+mod live;
