@@ -4,30 +4,36 @@
 //! admitted provider, converts results into safe attempt facts, validates
 //! evidence citations, and advances finite fallback.
 
-use std::time::Instant;
-
-use crate::adapters::llm::{
-    deepseek::DeepSeekClient,
-    gemini::GeminiClient,
-    openai::{AuthCache, OpenAiOAuth, refresh_and_complete},
-};
+use std::{future::Future, pin::Pin, time::Instant};
+use tokio::time::timeout;
 
 use super::{
     budget::Reservation,
     contracts::{DiagnosticReport, EvidenceRef},
-    coordinator::{AttemptFacts, FailureClass, RunStatus},
+    coordinator::{AttemptFacts, CoordinatorError, FailureClass, RunStatus},
     router::ProviderKind,
     runtime::{IncidentRuntime, RuntimeError},
 };
 
 /// Optional live providers configured for one process.
 pub struct LiveProviders<'a> {
-    /// OpenAI OAuth and rotating refresh-token cache.
-    pub openai: Option<(&'a OpenAiOAuth, &'a AuthCache)>,
-    /// Gemini API client.
-    pub gemini: Option<&'a GeminiClient>,
-    /// DeepSeek API client.
-    pub deepseek: Option<&'a DeepSeekClient>,
+    /// OpenAI capability, if its live gate is accepted.
+    pub openai: Option<&'a dyn LiveProvider>,
+    /// Gemini capability, if its live gate is accepted.
+    pub gemini: Option<&'a dyn LiveProvider>,
+    /// DeepSeek capability, if its live gate is accepted.
+    pub deepseek: Option<&'a dyn LiveProvider>,
+}
+
+/// Provider-neutral completion future returned by adapter capabilities.
+pub type LiveCompletion<'a> = Pin<
+    Box<dyn Future<Output = Result<(DiagnosticReport, Option<u64>), FailureClass>> + Send + 'a>,
+>;
+
+/// Core-owned provider capability; vendor adapters implement this boundary.
+pub trait LiveProvider: Sync {
+    /// Completes one bounded prompt and returns provider-neutral facts.
+    fn complete<'a>(&'a self, prompt: &'a str) -> LiveCompletion<'a>;
 }
 
 /// Executes the configured provider order with durable budget admission.
@@ -38,7 +44,9 @@ pub async fn run_live(
     reservation: Reservation,
     start_at_ms: u64,
 ) -> Result<RunStatus, RuntimeError> {
-    let evidence_queries = runtime.evidence().records().len() as u32;
+    // Evidence is collected once before provider fallback; do not charge it
+    // repeatedly to every model attempt.
+    let evidence_queries = 0;
     let evidence_id = runtime
         .evidence()
         .records()
@@ -47,27 +55,48 @@ pub async fn run_live(
     let mut at_ms = start_at_ms;
 
     loop {
-        let Some(provider) = runtime.admit_provider(reservation, at_ms)? else {
-            return Ok(RunStatus::Exhausted);
+        let provider = match runtime.admit_provider(reservation, at_ms) {
+            Ok(Some(provider)) => provider,
+            Ok(None) => return Ok(RunStatus::Exhausted),
+            Err(RuntimeError::Coordination(CoordinatorError::Budget(_))) => {
+                return Ok(RunStatus::Exhausted);
+            }
+            Err(error) => return Err(error),
         };
         let started = Instant::now();
-        let result = match provider {
-            ProviderKind::OpenAi => run_openai(providers.openai, prompt).await,
-            ProviderKind::Gemini => run_gemini(providers.gemini, prompt).await,
-            ProviderKind::DeepSeek => run_deepseek(providers.deepseek, prompt).await,
-            ProviderKind::Deterministic => Ok((
-                DiagnosticReport {
-                    summary:
-                        "No live provider was available; deterministic enrichment is required."
-                            .to_owned(),
-                    evidence: evidence_id
-                        .clone()
-                        .into_iter()
-                        .map(|evidence_id| EvidenceRef { evidence_id })
-                        .collect(),
-                },
-                None,
-            )),
+        let result = if let Some(remaining) = runtime.remaining() {
+            timeout(remaining, async {
+                match provider {
+                    ProviderKind::OpenAi => match providers.openai {
+                        Some(provider) => provider.complete(prompt).await,
+                        None => Err(FailureClass::TemporarilyUnavailable),
+                    },
+                    ProviderKind::Gemini => match providers.gemini {
+                        Some(provider) => provider.complete(prompt).await,
+                        None => Err(FailureClass::TemporarilyUnavailable),
+                    },
+                    ProviderKind::DeepSeek => match providers.deepseek {
+                        Some(provider) => provider.complete(prompt).await,
+                        None => Err(FailureClass::TemporarilyUnavailable),
+                    },
+                    ProviderKind::Deterministic => Ok((
+                        DiagnosticReport {
+                            summary: "No live provider was available; deterministic enrichment is required."
+                                .to_owned(),
+                            evidence: evidence_id
+                                .clone()
+                                .into_iter()
+                                .map(|evidence_id| EvidenceRef { evidence_id })
+                                .collect(),
+                        },
+                        None,
+                    )),
+                }
+            })
+            .await
+            .unwrap_or(Err(FailureClass::TemporarilyUnavailable))
+        } else {
+            Err(FailureClass::TemporarilyUnavailable)
         };
         let facts = AttemptFacts {
             elapsed_ms: started.elapsed().as_millis() as u64,
@@ -94,42 +123,6 @@ pub async fn run_live(
             }
             Err(failure) => runtime.fail_provider(provider, failure, facts, at_ms)?,
         }
-        at_ms = at_ms.saturating_add(1);
-    }
-}
-
-async fn run_openai(
-    provider: Option<(&OpenAiOAuth, &AuthCache)>,
-    prompt: &str,
-) -> Result<(DiagnosticReport, Option<u64>), FailureClass> {
-    match provider {
-        Some((oauth, cache)) => refresh_and_complete(oauth, cache, prompt).await,
-        None => Err(FailureClass::TemporarilyUnavailable),
-    }
-}
-
-async fn run_gemini(
-    provider: Option<&GeminiClient>,
-    prompt: &str,
-) -> Result<(DiagnosticReport, Option<u64>), FailureClass> {
-    match provider {
-        Some(client) => client
-            .complete_for_runtime(prompt)
-            .await
-            .map(|(report, facts)| (report, facts.tokens)),
-        None => Err(FailureClass::TemporarilyUnavailable),
-    }
-}
-
-async fn run_deepseek(
-    provider: Option<&DeepSeekClient>,
-    prompt: &str,
-) -> Result<(DiagnosticReport, Option<u64>), FailureClass> {
-    match provider {
-        Some(client) => client
-            .complete_for_runtime(prompt)
-            .await
-            .map(|(report, facts)| (report, facts.tokens)),
-        None => Err(FailureClass::TemporarilyUnavailable),
+        at_ms = runtime.elapsed_ms();
     }
 }

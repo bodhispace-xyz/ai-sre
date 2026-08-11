@@ -17,6 +17,7 @@ use rig_core::{
     completion::{AssistantContent, CompletionModel},
 };
 
+use crate::reasoning::live::{LiveCompletion, LiveProvider};
 use crate::reasoning::{contracts::DiagnosticReport, coordinator::FailureClass};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -62,7 +63,7 @@ pub enum RefreshFailure {
 }
 
 /// A short-lived access token and its rotated refresh token.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefreshedTokens {
     /// Access token passed to the provider client, never journaled.
     pub access_token: String,
@@ -70,6 +71,17 @@ pub struct RefreshedTokens {
     pub refresh_token: String,
     /// Optional UNIX expiry supplied by the provider.
     pub expires_at: Option<i64>,
+}
+
+impl fmt::Debug for RefreshedTokens {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RefreshedTokens")
+            .field("access_token", &"[redacted]")
+            .field("refresh_token", &"[redacted]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// Errors raised while reading or atomically replacing the OAuth cache.
@@ -302,6 +314,12 @@ pub async fn refresh_and_complete(
             CacheError::Io => FailureClass::TemporarilyUnavailable,
         })?;
     complete_with_rig(refreshed.access_token, prompt).await
+}
+
+impl<'a> LiveProvider for (&'a OpenAiOAuth, &'a AuthCache) {
+    fn complete<'b>(&'b self, prompt: &'b str) -> LiveCompletion<'b> {
+        Box::pin(async move { refresh_and_complete(self.0, self.1, prompt).await })
+    }
 }
 
 fn classify_rig_failure(error: rig_core::completion::CompletionError) -> FailureClass {

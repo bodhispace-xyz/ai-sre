@@ -15,6 +15,7 @@ use super::{
 
 /// Configurable inputs for one incident reasoning run.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ReasoningConfig {
     /// Provider fallback order for complete restarts.
     pub provider_order: ProviderOrder,
@@ -141,6 +142,24 @@ impl ReasoningRun {
         self.attempted.insert(provider);
         self.active = Some(provider);
         Ok(Some(provider))
+    }
+
+    /// Returns the next provider without consuming any budget.
+    pub fn next_provider(&self) -> Option<ProviderKind> {
+        if self.status.is_some() || self.active.is_some() {
+            return None;
+        }
+        next_provider_in(&self.attempted, &self.order)
+    }
+
+    /// Admits the deterministic baseline without model/tool reservation.
+    pub fn admit_deterministic(&mut self) -> Result<Option<ProviderKind>, CoordinatorError> {
+        if self.next_provider() != Some(ProviderKind::Deterministic) {
+            return Ok(None);
+        }
+        self.attempted.insert(ProviderKind::Deterministic);
+        self.active = Some(ProviderKind::Deterministic);
+        Ok(Some(ProviderKind::Deterministic))
     }
 
     /// Discards the failed complete run and permits the next fallback.

@@ -1,11 +1,11 @@
 //! GIVEN/WHEN/THEN contracts for the bounded Alertmanager HTTP intake.
 
-use ai_sre::transport::{AlertIntake, IntakeConfig, IntakeError};
+use ai_sre::transport::{AlertIntake, IntakeCommand, IntakeConfig, IntakeError};
 
 #[test]
 fn intake_accepts_only_the_bounded_alertmanager_webhook() {
     // Given a valid Alertmanager request with one firing alert.
-    let body = br#"{"alerts":[{"status":"firing","fingerprint":"fp-1","labels":{"alertname":"ApiDown","service":"api"},"annotations":{}}]}"#;
+    let body = br#"{"version":"4","groupKey":"{}:{alertname=\"ApiDown\"}","truncatedAlerts":0,"status":"firing","receiver":"ai-sre","groupLabels":{"alertname":"ApiDown"},"commonLabels":{"service":"api"},"commonAnnotations":{},"externalURL":"https://alertmanager.example","alerts":[{"status":"firing","fingerprint":"fp-1","labels":{"alertname":"ApiDown","service":"api"},"annotations":{}}]}"#;
     let request = format!(
         "POST /webhooks/alertmanager HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
         body.len(),
@@ -20,6 +20,51 @@ fn intake_accepts_only_the_bounded_alertmanager_webhook() {
     // Then one stable incident reaches the application boundary.
     assert_eq!(batch.incidents.len(), 1);
     assert_eq!(batch.incidents[0].incident_id, "incident-fp-1");
+}
+
+#[tokio::test]
+async fn authenticated_fragmented_request_waits_for_durable_ack() {
+    // Given an authenticated intake and a worker that controls durability.
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let address = listener.local_addr().expect("address");
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<IntakeCommand>(1);
+    let server = tokio::spawn(
+        AlertIntake::new(IntakeConfig::default())
+            .with_bearer_tokens("current-secret", Some("next-secret"))
+            .serve(listener, sender),
+    );
+    let body = br#"{"alerts":[{"status":"firing","fingerprint":"fp-auth","labels":{"alertname":"ApiDown"},"annotations":{}}]}"#;
+    let request = format!(
+        "POST /webhooks/alertmanager HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer current-secret\r\nContent-Length: {}\r\n\r\n{}",
+        body.len(),
+        std::str::from_utf8(body).expect("JSON is UTF-8")
+    );
+    let split = request.len() / 2;
+    let mut stream = tokio::net::TcpStream::connect(address)
+        .await
+        .expect("connect");
+
+    // When the valid request arrives in multiple TCP fragments.
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    stream
+        .write_all(&request.as_bytes()[..split])
+        .await
+        .expect("first fragment");
+    stream
+        .write_all(&request.as_bytes()[split..])
+        .await
+        .expect("second fragment");
+    let command = receiver.recv().await.expect("queued command");
+    assert_eq!(command.batch.incidents[0].incident_id, "incident-fp-auth");
+    command.acknowledged.send(Ok(())).expect("acknowledge");
+
+    // Then HTTP 202 is emitted only after the worker confirms durable admission.
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).await.expect("response");
+    assert!(response.starts_with(b"HTTP/1.1 202"));
+    server.abort();
 }
 
 #[test]

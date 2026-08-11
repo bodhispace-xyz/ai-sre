@@ -3,7 +3,10 @@
 //! Adapters call this service with already-classified results. The service owns
 //! sequencing and durable facts but performs no provider or Grafana I/O.
 
-use std::collections::BTreeSet;
+use std::{
+    collections::BTreeSet,
+    time::{Duration, Instant},
+};
 use thiserror::Error;
 
 use super::{
@@ -36,16 +39,22 @@ pub struct IncidentRuntime {
     evidence: EvidenceBoard,
     journal: IncidentJournal,
     last_report: Option<DiagnosticReport>,
+    started_at: Instant,
+    deadline: Instant,
 }
 
 impl IncidentRuntime {
     /// Creates a fresh runtime from versioned policy and budget configuration.
     pub fn new(config: ReasoningConfig) -> Result<Self, RuntimeError> {
+        let wall_time = Duration::from_secs(u64::from(config.budget.max_wall_time_secs));
+        let started_at = Instant::now();
         Ok(Self {
             run: ReasoningRun::new(config)?,
             evidence: EvidenceBoard::default(),
             journal: IncidentJournal::default(),
             last_report: None,
+            started_at,
+            deadline: started_at + wall_time,
         })
     }
 
@@ -76,7 +85,20 @@ impl IncidentRuntime {
             phase: Phase::Reasoning,
             at_ms,
         });
+        if self.run.next_provider() == Some(ProviderKind::Deterministic) {
+            return Ok(self.run.admit_deterministic()?);
+        }
         Ok(self.run.admit(reservation)?)
+    }
+
+    /// Returns the remaining incident wall-clock allowance.
+    pub fn remaining(&self) -> Option<Duration> {
+        self.deadline.checked_duration_since(Instant::now())
+    }
+
+    /// Returns elapsed monotonic milliseconds for journal boundaries.
+    pub fn elapsed_ms(&self) -> u64 {
+        self.started_at.elapsed().as_millis() as u64
     }
 
     /// Records a classified failed attempt and leaves the run eligible for fallback.

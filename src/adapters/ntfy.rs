@@ -5,6 +5,7 @@
 //! executable command.
 
 use reqwest::StatusCode;
+use std::time::Duration;
 use thiserror::Error;
 
 use crate::reasoning::investigation::InvestigationResult;
@@ -29,7 +30,10 @@ impl NtfyPublisher {
     /// Creates a publisher with an optional private bearer token.
     pub fn new(config: NtfyConfig, access_token: Option<String>) -> Self {
         Self {
-            client: reqwest::Client::new(),
+            client: reqwest::Client::builder()
+                .timeout(Duration::from_secs(10))
+                .build()
+                .expect("notification HTTP client configuration must be valid"),
             config,
             access_token,
         }
@@ -37,18 +41,23 @@ impl NtfyPublisher {
 
     /// Publishes one shadow recommendation; no action is authorized here.
     pub async fn publish(&self, result: &InvestigationResult) -> Result<(), NtfyError> {
+        self.publish_message(&render_message(result)).await
+    }
+
+    /// Publishes an already-rendered outbox message with the same bounded
+    /// transport and authentication policy.
+    pub async fn publish_message(&self, message: &str) -> Result<(), NtfyError> {
         let url = format!(
             "{}/{}",
             self.config.endpoint.trim_end_matches('/'),
             self.config.topic
         );
-        let message = render_message(result);
         let mut request = self
             .client
             .post(url)
             .header("Title", "AI SRE shadow investigation")
             .header("Tags", "mag,robot_face")
-            .body(message);
+            .body(message.to_owned());
         if let Some(token) = &self.access_token {
             request = request.bearer_auth(token);
         }
@@ -81,7 +90,7 @@ pub fn render_message(result: &InvestigationResult) -> String {
     format!(
         "Incident: {}\nProvider: {provider}\nSummary: {}\nEvidence: {} item(s)\nMode: shadow; no action executed.",
         result.incident_id,
-        result.report.summary,
+        crate::reasoning::investigation::redact_text(&result.report.summary),
         result.evidence_ids.len()
     )
 }

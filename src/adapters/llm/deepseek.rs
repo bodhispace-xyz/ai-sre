@@ -5,8 +5,9 @@ use std::time::Instant;
 
 use crate::reasoning::contracts::{ContractError, DiagnosticReport};
 use crate::reasoning::coordinator::{AttemptFacts, FailureClass};
+use crate::reasoning::live::{LiveCompletion, LiveProvider};
 
-use super::{ApiKey, MAX_RESPONSE_BYTES, ProviderFailure, REQUEST_TIMEOUT, classify_status};
+use super::{ApiKey, ProviderFailure, REQUEST_TIMEOUT, bounded_response_body, classify_status};
 
 const DEFAULT_ENDPOINT: &str = "https://api.deepseek.com/chat/completions";
 
@@ -60,13 +61,7 @@ impl DeepSeekClient {
             return Err(classify_status(response.status()));
         }
 
-        let body = response
-            .bytes()
-            .await
-            .map_err(|_| ProviderFailure::TemporarilyUnavailable)?;
-        if body.len() > MAX_RESPONSE_BYTES {
-            return Err(ProviderFailure::MalformedResponse);
-        }
+        let body = bounded_response_body(response).await?;
         let body = std::str::from_utf8(&body).map_err(|_| ProviderFailure::MalformedResponse)?;
         self.normalize_report(body)
     }
@@ -97,6 +92,16 @@ impl DeepSeekClient {
             .map(|choice| choice.message.content.as_str())
             .ok_or(ProviderFailure::MalformedResponse)?;
         DiagnosticReport::from_provider_json(text).map_err(contract_failure)
+    }
+}
+
+impl LiveProvider for DeepSeekClient {
+    fn complete<'a>(&'a self, prompt: &'a str) -> LiveCompletion<'a> {
+        Box::pin(async move {
+            self.complete_for_runtime(prompt)
+                .await
+                .map(|(report, facts)| (report, facts.tokens))
+        })
     }
 }
 

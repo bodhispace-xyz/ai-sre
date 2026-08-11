@@ -22,6 +22,7 @@ pub enum ProviderKind {
 
 /// Configurable provider order for one complete reasoning run.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderOrder {
     /// Providers attempted in order; each run restarts from the evidence board.
     pub providers: Vec<ProviderKind>,

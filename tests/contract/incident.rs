@@ -60,5 +60,42 @@ fn journal_store_replays_entries_and_continues_the_sequence() {
     // Then the prior fact is replayed and the next sequence is deterministic.
     assert_eq!(sequence, 1);
     assert_eq!(reopened.journal().entries().len(), 2);
+    let _ = std::fs::remove_file(&path);
+    let _ = std::fs::remove_file(path.with_extension("jsonl-wal"));
+    let _ = std::fs::remove_file(path.with_extension("jsonl-shm"));
+}
+
+#[test]
+fn journal_and_notification_intent_commit_atomically() {
+    // Given a fresh SQLite journal and a redacted notification intent.
+    let path = std::env::temp_dir().join(format!("ai-sre-outbox-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let mut store = JournalStore::open(&path).expect("open journal");
+
+    // When the lifecycle fact and outbox intent are committed together.
+    store
+        .append_with_outbox(
+            &[JournalEvent::IncidentOpened {
+                incident_id: "incident-outbox".to_owned(),
+                alert_name: "ApiDown".to_owned(),
+            }],
+            Some(&ai_sre::reasoning::storage::OutboxMessage {
+                delivery_id: "incident-outbox:report".to_owned(),
+                body: "redacted report".to_owned(),
+            }),
+        )
+        .expect("atomic commit");
+    drop(store);
+
+    // Then both the fact and the pending notification survive reopening.
+    let mut reopened = JournalStore::open(&path).expect("reopen journal");
+    assert_eq!(reopened.journal().entries().len(), 1);
+    assert_eq!(reopened.pending_outbox().expect("outbox").len(), 1);
+    assert!(
+        reopened
+            .mark_outbox_delivered("incident-outbox:report", 42)
+            .expect("mark delivered")
+    );
+    assert!(reopened.pending_outbox().expect("outbox").is_empty());
     let _ = std::fs::remove_file(path);
 }
