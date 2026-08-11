@@ -66,15 +66,35 @@ pub enum InvestigationError {
 
 /// Executes one admitted provider tool call and transfers immutable evidence
 /// from the adapter board into the incident runtime.
-pub async fn execute_model_tool(
-    grafana: &GrafanaContext,
-    runtime: &mut IncidentRuntime,
-    board: &mut super::evidence::EvidenceBoard,
-    context_budget: &mut ContextBudget,
-    loop_state: &mut ToolLoop,
+struct ToolExecutionContext<'a> {
+    grafana: &'a GrafanaContext,
+    runtime: &'a mut IncidentRuntime,
+    journal: &'a mut JournalStore,
+    journal_context: &'a JournalContext,
+    board: &'a mut super::evidence::EvidenceBoard,
+    context_budget: &'a mut ContextBudget,
+    loop_state: &'a mut ToolLoop,
+}
+
+async fn execute_model_tool(
+    provider: ProviderKind,
+    context: &mut ToolExecutionContext<'_>,
     call: &ToolCall,
 ) -> Result<ToolResult, InvestigationError> {
-    if let Err(error) = loop_state.admit(call) {
+    if context
+        .journal
+        .tool_request_recorded(context.journal_context, &call.call_id)
+    {
+        let result = ToolResult {
+            call_id: call.call_id.clone(),
+            class: ToolResultClass::Exhausted,
+            evidence_id: None,
+            detail: "tool call already has a durable checkpoint".to_owned(),
+        };
+        context.loop_state.record_result(result.clone());
+        return Ok(result);
+    }
+    if let Err(error) = context.loop_state.admit(call) {
         let class = if matches!(error, ToolLoopError::TurnLimit) {
             ToolResultClass::Exhausted
         } else {
@@ -86,50 +106,67 @@ pub async fn execute_model_tool(
             evidence_id: None,
             detail: error.to_string(),
         };
-        loop_state.record_result(result.clone());
+        context.loop_state.record_result(result.clone());
         return Ok(result);
     }
-    if runtime.reserve_evidence_query().is_err() {
+    if context.runtime.reserve_evidence_query().is_err() {
         let result = ToolResult {
             call_id: call.call_id.clone(),
             class: ToolResultClass::Exhausted,
             evidence_id: None,
             detail: "incident evidence-query budget exhausted".to_owned(),
         };
-        loop_state.record_result(result.clone());
+        context.loop_state.record_result(result.clone());
         return Ok(result);
     }
-    let Some(remaining) = runtime.remaining() else {
+    context.journal.append_checkpoint_scoped(
+        &format!("tool-request:{}", call.call_id),
+        &[JournalEvent::ToolRequested {
+            provider,
+            call_id: call.call_id.clone(),
+            tool: tool_name(&call.tool).to_owned(),
+            query_digest: super::journal::query_digest(&call.query),
+            evidence_queries_before: context.runtime.budget_totals().2.saturating_sub(1),
+            at_ms: context.runtime.elapsed_ms(),
+        }],
+        Some(context.journal_context),
+    )?;
+    let Some(remaining) = context.runtime.remaining() else {
         let result = ToolResult {
             call_id: call.call_id.clone(),
             class: ToolResultClass::Exhausted,
             evidence_id: None,
             detail: "incident deadline exhausted before context query".to_owned(),
         };
-        loop_state.record_result(result.clone());
+        context.loop_state.record_result(result.clone());
         return Ok(result);
     };
-    let mut result =
-        tokio::time::timeout(remaining, grafana.execute_tool(board, context_budget, call))
-            .await
-            .unwrap_or_else(|_| ToolResult {
-                call_id: call.call_id.clone(),
-                class: ToolResultClass::Exhausted,
-                evidence_id: None,
-                detail: "incident deadline exhausted during context query".to_owned(),
-            });
+    let mut result = tokio::time::timeout(
+        remaining,
+        context
+            .grafana
+            .execute_tool(context.board, context.context_budget, call),
+    )
+    .await
+    .unwrap_or_else(|_| ToolResult {
+        call_id: call.call_id.clone(),
+        class: ToolResultClass::Exhausted,
+        evidence_id: None,
+        detail: "incident deadline exhausted during context query".to_owned(),
+    });
     if result.class == ToolResultClass::Succeeded {
         if let Some(evidence_id) = &result.evidence_id {
-            if let Some(record) = board
+            if let Some(record) = context
+                .board
                 .records()
                 .iter()
                 .find(|record| &record.evidence_id == evidence_id)
             {
-                let runtime_evidence_id = runtime.commit_evidence(
+                let runtime_evidence_id = context.runtime.commit_evidence(
                     record.source,
                     record.query.clone(),
                     record.payload.clone(),
-                    runtime.elapsed_ms(),
+                    context.runtime.elapsed_ms(),
                 )?;
                 result.evidence_id = Some(runtime_evidence_id);
                 result.detail = redact_text(&String::from_utf8_lossy(&record.payload));
@@ -143,7 +180,7 @@ pub async fn execute_model_tool(
             }
         }
     }
-    loop_state.record_result(result.clone());
+    context.loop_state.record_result(result.clone());
     Ok(result)
 }
 
@@ -197,6 +234,7 @@ pub async fn investigate_live(
     )?;
     let mut collected = super::evidence::EvidenceBoard::default();
     let mut context_budget = ContextBudget::new(runtime.max_evidence_queries() as usize);
+    let mut persisted_runtime_entries = 0_usize;
     let requests = [
         ReadOnlyRequest::Logs(queries.logs),
         ReadOnlyRequest::Metrics(queries.metrics),
@@ -231,6 +269,7 @@ pub async fn investigate_live(
             record.payload.clone(),
             runtime.elapsed_ms(),
         )?;
+        persist_runtime_events(runtime, journal, &context, &mut persisted_runtime_entries)?;
     }
     journal.append_scoped(
         JournalEvent::PhaseFinished {
@@ -242,7 +281,6 @@ pub async fn investigate_live(
     let prompt = build_prompt(signal, runtime);
     let mut tool_board = super::evidence::EvidenceBoard::default();
     let mut tool_context_budget = ContextBudget::new(runtime.max_evidence_queries() as usize);
-    let mut persisted_runtime_entries = 0_usize;
     persist_runtime_events(runtime, journal, &context, &mut persisted_runtime_entries)?;
     let run_result = run_live_with_context(ContextLiveInput {
         runtime,
@@ -310,7 +348,11 @@ fn persist_runtime_events(
         .iter()
         .map(|entry| entry.event.clone())
         .collect::<Vec<_>>();
-    journal.append_with_outbox_scoped(&events, None, Some(context))?;
+    let checkpoint_id = format!(
+        "runtime-events:{}:{}",
+        context.run_id, persisted_runtime_entries
+    );
+    journal.append_checkpoint_scoped(&checkpoint_id, &events, Some(context))?;
     *persisted_runtime_entries = entries.len();
     Ok(())
 }
@@ -345,6 +387,7 @@ async fn run_live_with_context(
                 ))
             })?,
         );
+        let mut turn_started = std::time::Instant::now();
         let mut turn = match runtime.remaining() {
             Some(remaining) => timeout(
                 remaining,
@@ -356,13 +399,21 @@ async fn run_live_with_context(
             )),
             None => Err(super::coordinator::FailureClass::TemporarilyUnavailable),
         };
-        loop {
-            let started = std::time::Instant::now();
+        let mut attempt_elapsed_ms = 0_u64;
+        let mut attempt_tokens = 0_u64;
+        let mut has_token_usage = false;
+        'turn: loop {
+            let turn_elapsed_ms = turn_started.elapsed().as_millis() as u64;
             match turn {
                 Ok(super::live::LiveTurn::Final { report, tokens }) => {
+                    attempt_elapsed_ms = attempt_elapsed_ms.saturating_add(turn_elapsed_ms);
+                    if let Some(tokens) = tokens {
+                        attempt_tokens = attempt_tokens.saturating_add(tokens);
+                        has_token_usage = true;
+                    }
                     let facts = super::coordinator::AttemptFacts {
-                        elapsed_ms: started.elapsed().as_millis() as u64,
-                        tokens,
+                        elapsed_ms: attempt_elapsed_ms,
+                        tokens: has_token_usage.then_some(attempt_tokens),
                         evidence_queries: loop_state.results().len() as u32,
                         ..Default::default()
                     };
@@ -373,22 +424,44 @@ async fn run_live_with_context(
                         .map(|record| record.evidence_id.clone())
                         .collect::<BTreeSet<_>>();
                     if report.validate_against(&evidence_ids).is_ok() {
-                        return Ok(
-                            runtime.succeed_provider_with_report(provider, report, facts, at_ms)?
-                        );
+                        let status = runtime.succeed_provider_with_report(
+                            provider,
+                            report,
+                            facts,
+                            runtime.elapsed_ms(),
+                        )?;
+                        persist_runtime_events(
+                            runtime,
+                            journal,
+                            journal_context,
+                            persisted_runtime_entries,
+                        )?;
+                        return Ok(status);
                     }
                     runtime.fail_provider(
                         provider,
                         super::coordinator::FailureClass::MalformedResponse,
                         facts,
-                        at_ms,
+                        runtime.elapsed_ms(),
+                    )?;
+                    persist_runtime_events(
+                        runtime,
+                        journal,
+                        journal_context,
+                        persisted_runtime_entries,
                     )?;
                     break;
                 }
-                Ok(super::live::LiveTurn::ToolCalls { calls, .. }) => {
+                Ok(super::live::LiveTurn::ToolCalls { calls, tokens }) => {
+                    attempt_elapsed_ms = attempt_elapsed_ms.saturating_add(turn_elapsed_ms);
+                    if let Some(tokens) = tokens {
+                        attempt_tokens = attempt_tokens.saturating_add(tokens);
+                        has_token_usage = true;
+                    }
                     if calls.is_empty() {
                         let facts = super::coordinator::AttemptFacts {
-                            elapsed_ms: started.elapsed().as_millis() as u64,
+                            elapsed_ms: attempt_elapsed_ms,
+                            tokens: has_token_usage.then_some(attempt_tokens),
                             evidence_queries: loop_state.results().len() as u32,
                             ..Default::default()
                         };
@@ -396,31 +469,65 @@ async fn run_live_with_context(
                             provider,
                             super::coordinator::FailureClass::MalformedResponse,
                             facts,
-                            at_ms,
+                            runtime.elapsed_ms(),
+                        )?;
+                        persist_runtime_events(
+                            runtime,
+                            journal,
+                            journal_context,
+                            persisted_runtime_entries,
+                        )?;
+                        break;
+                    }
+                    if calls.len() > super::tools::MAX_TOOL_CALLS_PER_RESPONSE {
+                        let facts = super::coordinator::AttemptFacts {
+                            elapsed_ms: attempt_elapsed_ms,
+                            tokens: has_token_usage.then_some(attempt_tokens),
+                            evidence_queries: loop_state.results().len() as u32,
+                            ..Default::default()
+                        };
+                        runtime.fail_provider(
+                            provider,
+                            super::coordinator::FailureClass::MalformedResponse,
+                            facts,
+                            runtime.elapsed_ms(),
+                        )?;
+                        persist_runtime_events(
+                            runtime,
+                            journal,
+                            journal_context,
+                            persisted_runtime_entries,
                         )?;
                         break;
                     }
                     for call in calls {
                         let evidence_queries_before = runtime.budget_totals().2;
                         let tool_started = std::time::Instant::now();
-                        let result = execute_model_tool(
-                            grafana,
-                            runtime,
-                            board,
-                            context_budget,
-                            &mut loop_state,
-                            &call,
-                        )
-                        .await
-                        .map_err(|error| {
-                            RuntimeError::Evidence(match error {
-                                InvestigationError::Context(ContextError::Evidence(e)) => e,
-                                _ => crate::reasoning::evidence::EvidenceError::EmptyPayload,
-                            })
-                        })?;
+                        let result = {
+                            let mut tool_context = ToolExecutionContext {
+                                grafana,
+                                runtime,
+                                journal,
+                                journal_context,
+                                board,
+                                context_budget,
+                                loop_state: &mut loop_state,
+                            };
+                            execute_model_tool(provider, &mut tool_context, &call)
+                                .await
+                                .map_err(|error| {
+                                    RuntimeError::Evidence(match error {
+                                        InvestigationError::Context(ContextError::Evidence(e)) => e,
+                                        _ => {
+                                            crate::reasoning::evidence::EvidenceError::EmptyPayload
+                                        }
+                                    })
+                                })?
+                        };
                         let evidence_queries_after = runtime.budget_totals().2;
                         runtime.record_tool_context(super::journal::ToolContextFacts {
                             provider,
+                            call_id: call.call_id.clone(),
                             tool: tool_name(&call.tool).to_owned(),
                             query_digest: super::journal::query_digest(&call.query),
                             result_class: result.class,
@@ -436,7 +543,29 @@ async fn run_live_with_context(
                             journal_context,
                             persisted_runtime_entries,
                         )?;
+                        if loop_state.result_bytes() > super::tools::MAX_TOOL_RESULT_BYTES {
+                            let facts = super::coordinator::AttemptFacts {
+                                elapsed_ms: attempt_elapsed_ms,
+                                tokens: has_token_usage.then_some(attempt_tokens),
+                                evidence_queries: loop_state.results().len() as u32,
+                                ..Default::default()
+                            };
+                            runtime.fail_provider(
+                                provider,
+                                super::coordinator::FailureClass::MalformedResponse,
+                                facts,
+                                runtime.elapsed_ms(),
+                            )?;
+                            persist_runtime_events(
+                                runtime,
+                                journal,
+                                journal_context,
+                                persisted_runtime_entries,
+                            )?;
+                            break 'turn;
+                        }
                     }
+                    turn_started = std::time::Instant::now();
                     turn = match runtime.remaining() {
                         Some(remaining) => timeout(
                             remaining,
@@ -458,11 +587,18 @@ async fn run_live_with_context(
                 }
                 Err(failure) => {
                     let facts = super::coordinator::AttemptFacts {
-                        elapsed_ms: started.elapsed().as_millis() as u64,
+                        elapsed_ms: attempt_elapsed_ms.saturating_add(turn_elapsed_ms),
+                        tokens: has_token_usage.then_some(attempt_tokens),
                         evidence_queries: loop_state.results().len() as u32,
                         ..Default::default()
                     };
-                    runtime.fail_provider(provider, failure, facts, at_ms)?;
+                    runtime.fail_provider(provider, failure, facts, runtime.elapsed_ms())?;
+                    persist_runtime_events(
+                        runtime,
+                        journal,
+                        journal_context,
+                        persisted_runtime_entries,
+                    )?;
                     break;
                 }
             }
@@ -700,14 +836,14 @@ mod tests {
     use crate::reasoning::{
         budget::Reservation,
         coordinator::ReasoningConfig,
-        journal::{JournalContext, ToolContextFacts, query_digest},
+        journal::{JournalContext, JournalEvent, ToolContextFacts, query_digest},
         live::{LiveCompletion, LiveProvider, LiveProviders, LiveTurn},
         router::ProviderKind,
         runtime::IncidentRuntime,
         storage::JournalStore,
         tools::{ContextTool, ToolCall, ToolResultClass},
     };
-    use std::{sync::Mutex, time::Duration};
+    use std::{path::PathBuf, sync::Mutex, time::Duration};
 
     #[test]
     fn tool_checkpoint_survives_store_reopen() {
@@ -732,6 +868,7 @@ mod tests {
             .expect("evidence");
         runtime.record_tool_context(ToolContextFacts {
             provider: ProviderKind::OpenAi,
+            call_id: "call-checkpoint".to_owned(),
             tool: "query_logs".to_owned(),
             query_digest: query_digest("{app=\"api\"}"),
             result_class: ToolResultClass::Succeeded,
@@ -759,6 +896,7 @@ mod tests {
 
     struct ScriptedProvider {
         turns: Mutex<u8>,
+        journal_path: PathBuf,
     }
 
     impl LiveProvider for ScriptedProvider {
@@ -777,6 +915,27 @@ mod tests {
                 *turns += 1;
                 first
             };
+            if !is_first {
+                let reopened = JournalStore::open(&self.journal_path).expect("reopen journal");
+                let entries = reopened.journal().entries();
+                let request_index = entries.iter().position(|entry| {
+                    matches!(&entry.event, JournalEvent::ToolRequested { call_id, .. } if call_id == "call-1")
+                });
+                let context_index = entries.iter().position(|entry| {
+                    matches!(&entry.event, JournalEvent::ToolContext { call_id, .. } if call_id == "call-1")
+                });
+                assert!(
+                    request_index.is_some(),
+                    "request must be durable before resume"
+                );
+                assert!(
+                    context_index.is_some(),
+                    "result must be durable before resume"
+                );
+                assert!(request_index < context_index, "request must precede result");
+                let serialized = serde_json::to_string(entries).expect("serialize journal");
+                assert!(!serialized.contains("{app=\"api\"}"));
+            }
             Box::pin(async move {
                 if is_first {
                     Ok(LiveTurn::ToolCalls {
@@ -832,6 +991,7 @@ mod tests {
         );
         let provider = ScriptedProvider {
             turns: Mutex::new(0),
+            journal_path: path.clone(),
         };
         let mut runtime = IncidentRuntime::new(ReasoningConfig::default()).expect("runtime");
         let mut board = super::super::evidence::EvidenceBoard::default();

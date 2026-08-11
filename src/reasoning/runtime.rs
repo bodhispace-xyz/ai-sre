@@ -93,6 +93,7 @@ impl IncidentRuntime {
     pub fn record_tool_context(&mut self, facts: super::journal::ToolContextFacts) {
         self.journal.append(JournalEvent::ToolContext {
             provider: facts.provider,
+            call_id: facts.call_id,
             tool: facts.tool,
             query_digest: facts.query_digest,
             result_class: facts.result_class,

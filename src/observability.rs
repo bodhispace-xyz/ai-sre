@@ -176,9 +176,25 @@ mod tests {
                 alert_name: "ApiDown".to_owned(),
             })
             .expect("append incident");
+        store
+            .append(JournalEvent::ToolContext {
+                provider: crate::reasoning::router::ProviderKind::OpenAi,
+                call_id: "call-1".to_owned(),
+                tool: "query_logs".to_owned(),
+                query_digest: crate::reasoning::journal::query_digest("{app=\"api\"}"),
+                result_class: crate::reasoning::tools::ToolResultClass::Succeeded,
+                elapsed_ms: 12,
+                output_bytes: 128,
+                evidence_queries_before: 0,
+                evidence_queries_after: 1,
+                at_ms: 2,
+            })
+            .expect("append tool fact");
         let metrics = render_journal_metrics(store.journal());
         assert!(metrics.contains("ai_sre_incidents_opened_total 1"));
-        assert!(metrics.contains("ai_sre_tool_calls_total 0"));
+        assert!(metrics.contains("ai_sre_tool_calls_total 1"));
+        assert!(metrics.contains("ai_sre_successful_tool_calls_total 1"));
+        assert!(metrics.contains("ai_sre_tool_output_bytes_total 128"));
         assert!(!metrics.contains("secret-incident-id"));
         assert!(!metrics.contains("incident_id="));
         let _ = std::fs::remove_file(&path);

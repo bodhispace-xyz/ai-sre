@@ -85,6 +85,7 @@ impl IncidentDispatcher {
                 | JournalEvent::AlertDeduplicated { .. }
                 | JournalEvent::EvidenceCommitted { .. }
                 | JournalEvent::ToolContext { .. }
+                | JournalEvent::ToolRequested { .. }
                 | JournalEvent::PhaseStarted { .. }
                 | JournalEvent::PhaseFinished { .. }
                 | JournalEvent::ProviderAttempt(_)

@@ -406,6 +406,7 @@ fn journal_projection_rebuilds_bounded_tool_usage_without_raw_queries() {
     let mut journal = IncidentJournal::default();
     journal.append(JournalEvent::ToolContext {
         provider: ProviderKind::OpenAi,
+        call_id: "call-1".to_owned(),
         tool: "query_logs".to_owned(),
         query_digest: query_digest(query),
         result_class: ai_sre::reasoning::tools::ToolResultClass::Succeeded,
@@ -428,6 +429,7 @@ fn journal_projection_rebuilds_bounded_tool_usage_without_raw_queries() {
         journal.entries()[0].event,
         JournalEvent::ToolContext {
             provider: ProviderKind::OpenAi,
+            call_id: "call-1".to_owned(),
             tool: "query_logs".to_owned(),
             query_digest: query.to_owned(),
             result_class: ai_sre::reasoning::tools::ToolResultClass::Succeeded,
@@ -466,14 +468,18 @@ fn journal_store_reopens_scoped_tool_context_projection() {
         run_id: "run-1".to_owned(),
     };
     let mut store = ai_sre::reasoning::storage::JournalStore::open(&path).expect("open journal");
-    for result_class in [
+    for (index, result_class) in [
         ai_sre::reasoning::tools::ToolResultClass::Succeeded,
         ai_sre::reasoning::tools::ToolResultClass::Denied,
-    ] {
+    ]
+    .into_iter()
+    .enumerate()
+    {
         store
             .append_scoped(
                 JournalEvent::ToolContext {
                     provider: ProviderKind::OpenAi,
+                    call_id: format!("call-{index}"),
                     tool: "query_logs".to_owned(),
                     query_digest: query_digest("{app=\"api\"}"),
                     result_class,
@@ -498,6 +504,63 @@ fn journal_store_reopens_scoped_tool_context_projection() {
     assert_eq!(projection.successful_tool_calls, 1);
     assert_eq!(projection.tool_elapsed_ms, 22);
     assert_eq!(projection.tool_output_bytes, 256);
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn journal_checkpoint_retries_are_idempotent_and_scope_isolated() {
+    // Given two runs that use the same provider call identifier.
+    let path = std::env::temp_dir().join(format!(
+        "ai-sre-checkpoint-idempotency-{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let first = JournalContext {
+        incident_id: "incident-a".to_owned(),
+        run_id: "run-a".to_owned(),
+    };
+    let second = JournalContext {
+        incident_id: "incident-b".to_owned(),
+        run_id: "run-b".to_owned(),
+    };
+    let requested = JournalEvent::ToolRequested {
+        provider: ProviderKind::OpenAi,
+        call_id: "shared-call".to_owned(),
+        tool: "query_logs".to_owned(),
+        query_digest: query_digest("{app=\"api\"}"),
+        evidence_queries_before: 0,
+        at_ms: 1,
+    };
+    let mut store = ai_sre::reasoning::storage::JournalStore::open(&path).expect("open journal");
+
+    // When the same durable checkpoint is retried after an ambiguous commit.
+    assert!(
+        store
+            .append_checkpoint_scoped("request-a", std::slice::from_ref(&requested), Some(&first))
+            .expect("first checkpoint")
+    );
+    assert!(
+        !store
+            .append_checkpoint_scoped("request-a", std::slice::from_ref(&requested), Some(&first))
+            .expect("retry checkpoint")
+    );
+    store
+        .append_checkpoint_scoped("request-b", std::slice::from_ref(&requested), Some(&second))
+        .expect("second scope checkpoint");
+
+    // Then replay keeps one event per checkpoint and never mixes scopes.
+    assert_eq!(store.journal().entries().len(), 2);
+    assert!(store.tool_request_recorded(&first, "shared-call"));
+    assert!(store.tool_request_recorded(&second, "shared-call"));
+    assert!(!store.tool_request_recorded(
+        &JournalContext {
+            incident_id: "incident-a".to_owned(),
+            run_id: "run-other".to_owned(),
+        },
+        "shared-call"
+    ));
+    let serialized = serde_json::to_string(store.journal().entries()).expect("serialize journal");
+    assert!(!serialized.contains("{app=\"api\"}"));
     let _ = std::fs::remove_file(&path);
 }
 

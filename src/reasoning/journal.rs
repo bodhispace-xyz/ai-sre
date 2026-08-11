@@ -78,10 +78,27 @@ pub enum JournalEvent {
     },
     /// Stores one complete provider-attempt result.
     ProviderAttempt(AttemptRecord),
+    /// Records an authorized context request before external I/O begins.
+    ToolRequested {
+        /// Provider that requested the capability.
+        provider: ProviderKind,
+        /// Provider correlation identifier.
+        call_id: String,
+        /// Allowlisted capability name.
+        tool: String,
+        /// Stable non-secret query digest.
+        query_digest: String,
+        /// Reserved evidence-query count before this request.
+        evidence_queries_before: u32,
+        /// Monotonic request timestamp.
+        at_ms: u64,
+    },
     /// Stores one bounded model-directed context request and its result.
     ToolContext {
         /// Provider that requested the context capability.
         provider: ProviderKind,
+        /// Provider correlation identifier.
+        call_id: String,
         /// Allowlisted capability name, never a raw command.
         tool: String,
         /// Stable non-secret digest of the query expression.
@@ -111,6 +128,8 @@ pub enum JournalEvent {
 pub struct ToolContextFacts {
     /// Provider that requested the context capability.
     pub provider: ProviderKind,
+    /// Provider correlation identifier.
+    pub call_id: String,
     /// Allowlisted capability name, never a raw command.
     pub tool: String,
     /// Stable non-secret digest of the query expression.
@@ -218,6 +237,7 @@ impl IncidentJournal {
                 | JournalEvent::IncidentCompleted { .. }
                 | JournalEvent::IncidentResumed { .. }
                 | JournalEvent::EvidenceCommitted { .. } => {}
+                JournalEvent::ToolRequested { .. } => {}
                 JournalEvent::ToolContext {
                     elapsed_ms,
                     output_bytes,
