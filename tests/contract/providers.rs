@@ -5,8 +5,9 @@ use std::collections::BTreeSet;
 use ai_sre::adapters::llm::{
     ApiKey, ProviderFailure, deepseek::DeepSeekClient, gemini::GeminiClient,
 };
+use ai_sre::reasoning::budget::{BudgetConfig, BudgetError, BudgetState, Reservation};
 use ai_sre::reasoning::contracts::{ContractError, DiagnosticReport, EvidenceRef};
-use ai_sre::reasoning::router::{ProviderKind, next_provider};
+use ai_sre::reasoning::router::{ProviderKind, ProviderOrder, next_provider, next_provider_in};
 
 #[test]
 fn api_keys_are_redacted_and_provider_clients_normalize_common_reports() {
@@ -185,4 +186,53 @@ fn provider_json_rejects_malformed_output_without_exposing_provider_details() {
 
     // Then parsing returns a safe classified error without provider payload details.
     assert_eq!(result, Err(ContractError::MalformedProviderResponse));
+}
+
+#[test]
+fn provider_order_is_configurable_without_allowing_duplicates() {
+    // Given an operator-selected order that starts with Gemini.
+    let order = ProviderOrder {
+        providers: vec![ProviderKind::Gemini, ProviderKind::Deterministic],
+    };
+    let attempted = BTreeSet::from([ProviderKind::Gemini]);
+
+    // When the configured order is validated and queried.
+    let next = next_provider_in(&attempted, &order);
+
+    // Then the next provider follows configuration rather than a hard-coded list.
+    assert_eq!(order.validate(), Ok(()));
+    assert_eq!(next, Some(ProviderKind::Deterministic));
+}
+
+#[test]
+fn budget_reservation_is_atomic_and_rejects_overcommitment() {
+    // Given a deliberately small incident budget.
+    let config = BudgetConfig {
+        max_provider_calls: 2,
+        max_tokens: 100,
+        max_evidence_queries: 4,
+        max_wall_time_secs: 30,
+        max_cost_micro_usd: Some(500),
+    };
+    let mut state = BudgetState::new(config);
+    let first = Reservation {
+        provider_calls: 1,
+        tokens: 60,
+        evidence_queries: 2,
+        cost_micro_usd: 300,
+    };
+
+    // When a second reservation would exceed the token ceiling.
+    assert_eq!(state.reserve(first), Ok(()));
+    let before = state.totals();
+    let rejected = state.reserve(Reservation {
+        provider_calls: 1,
+        tokens: 50,
+        evidence_queries: 1,
+        cost_micro_usd: 100,
+    });
+
+    // Then rejection leaves every accounting dimension unchanged.
+    assert_eq!(rejected, Err(BudgetError::Tokens));
+    assert_eq!(state.totals(), before);
 }
