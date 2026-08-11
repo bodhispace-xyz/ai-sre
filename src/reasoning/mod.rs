@@ -1,5 +1,6 @@
 //! Advisory reasoning contracts. These types do not grant runtime authority.
 
+pub mod baseline;
 pub mod budget;
 pub mod contracts;
 pub mod coordinator;

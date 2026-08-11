@@ -8,8 +8,9 @@ use std::{future::Future, pin::Pin, time::Instant};
 use tokio::time::timeout;
 
 use super::{
+    baseline::build_report,
     budget::Reservation,
-    contracts::{DiagnosticReport, EvidenceRef},
+    contracts::DiagnosticReport,
     coordinator::{AttemptFacts, CoordinatorError, FailureClass, RunStatus},
     router::ProviderKind,
     runtime::{IncidentRuntime, RuntimeError},
@@ -47,11 +48,12 @@ pub async fn run_live(
     // Evidence is collected once before provider fallback; do not charge it
     // repeatedly to every model attempt.
     let evidence_queries = 0;
-    let evidence_id = runtime
+    let evidence_ids = runtime
         .evidence()
         .records()
-        .first()
-        .map(|record| record.evidence_id.clone());
+        .iter()
+        .map(|record| record.evidence_id.clone())
+        .collect();
     let mut at_ms = start_at_ms;
 
     loop {
@@ -79,18 +81,9 @@ pub async fn run_live(
                         Some(provider) => provider.complete(prompt).await,
                         None => Err(FailureClass::TemporarilyUnavailable),
                     },
-                    ProviderKind::Deterministic => Ok((
-                        DiagnosticReport {
-                            summary: "No live provider was available; deterministic enrichment is required."
-                                .to_owned(),
-                            evidence: evidence_id
-                                .clone()
-                                .into_iter()
-                                .map(|evidence_id| EvidenceRef { evidence_id })
-                                .collect(),
-                        },
-                        None,
-                    )),
+                    ProviderKind::Deterministic => {
+                        Ok((build_report("incident", &evidence_ids), None))
+                    }
                 }
             })
             .await
