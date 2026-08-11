@@ -9,7 +9,10 @@ use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 use thiserror::Error;
 use tokio::{io::AsyncReadExt, process::Command, sync::Semaphore, time};
 
-use crate::reasoning::evidence::{EvidenceBoard, EvidenceError, EvidenceSource};
+use crate::reasoning::evidence::{
+    EvidenceBoard, EvidenceError, EvidenceMetadata, EvidenceSource, EvidenceStatus,
+    MAX_EVIDENCE_QUERY_BYTES,
+};
 use crate::reasoning::tools::{ContextTool, ToolCall, ToolResult, ToolResultClass};
 
 const MAX_SELECTOR_BYTES: usize = 512;
@@ -242,7 +245,13 @@ impl ReadOnlyContext {
 
     /// Executes one Git or health tool call using only server-owned selectors.
     pub async fn execute_tool(&self, board: &mut EvidenceBoard, call: &ToolCall) -> ToolResult {
-        let outcome = match call.tool {
+        let source = match call.tool {
+            ContextTool::ReadDesiredState => EvidenceSource::GitDesiredState,
+            ContextTool::ReadDeploymentHistory => EvidenceSource::DeploymentHistory,
+            ContextTool::ReadHealth => EvidenceSource::Health,
+            ContextTool::QueryLogs | ContextTool::QueryMetrics => EvidenceSource::Health,
+        };
+        let result = match call.tool {
             ContextTool::ReadDesiredState => {
                 let Some((revision, path)) = call.query.split_once('\n') else {
                     return denied_result(call);
@@ -255,7 +264,7 @@ impl ReadOnlyContext {
             ContextTool::ReadHealth => self.health(board, call.query.trim()).await,
             ContextTool::QueryLogs | ContextTool::QueryMetrics => return denied_result(call),
         };
-        match outcome {
+        let mut result = match result {
             Ok(evidence_id) => ToolResult {
                 call_id: call.call_id.clone(),
                 class: ToolResultClass::Succeeded,
@@ -275,7 +284,29 @@ impl ReadOnlyContext {
                 evidence_id: None,
                 detail: "context backend unavailable".to_owned(),
             },
+        };
+        if result.evidence_id.is_none() {
+            let status = match result.class {
+                ToolResultClass::Truncated => EvidenceStatus::Partial,
+                ToolResultClass::Denied => EvidenceStatus::Rejected,
+                ToolResultClass::Exhausted => EvidenceStatus::BudgetExhausted,
+                _ => EvidenceStatus::Unavailable,
+            };
+            result.evidence_id = board
+                .commit_with_metadata(
+                    source,
+                    bounded_failure_query(&call.query),
+                    b"[NO EVIDENCE]".to_vec(),
+                    EvidenceMetadata {
+                        status,
+                        freshness_ms: None,
+                        truncated: status == EvidenceStatus::Partial,
+                        error: Some("read-only context request did not complete".to_owned()),
+                    },
+                )
+                .ok();
         }
+        result
     }
 }
 
@@ -285,6 +316,14 @@ fn denied_result(call: &ToolCall) -> ToolResult {
         class: ToolResultClass::Denied,
         evidence_id: None,
         detail: "context request rejected by server policy".to_owned(),
+    }
+}
+
+fn bounded_failure_query(query: &str) -> String {
+    if query.len() <= MAX_EVIDENCE_QUERY_BYTES {
+        query.to_owned()
+    } else {
+        "[QUERY_REDACTED]".to_owned()
     }
 }
 

@@ -160,3 +160,37 @@ async fn context_tool_execution_rejects_grafana_capabilities_at_the_wrong_bounda
     assert_eq!(result.class, ToolResultClass::Denied);
     assert!(board.records().is_empty());
 }
+
+#[tokio::test]
+async fn failed_health_reads_leave_explicit_failure_evidence() {
+    // Given a configured but unknown health alias.
+    let binary = fixture_script("printf 'unused'");
+    let context = ReadOnlyContext::new(
+        ReadOnlyRunner::new(Duration::from_secs(1), 128, 1),
+        ReadOnlyContextConfig {
+            git_binary: binary.clone(),
+            git_repository: "/srv/repo".to_owned(),
+            health_binary: binary,
+            health_commands: BTreeMap::new(),
+        },
+    )
+    .expect("valid context config");
+    let mut board = EvidenceBoard::default();
+    let call = ToolCall {
+        call_id: "health-1".to_owned(),
+        tool: ContextTool::ReadHealth,
+        query: "api".to_owned(),
+    };
+
+    // When the adapter rejects the alias before process execution.
+    let result = context.execute_tool(&mut board, &call).await;
+
+    // Then the failure remains explicit, bounded, and attributable to health.
+    assert_eq!(result.class, ToolResultClass::Denied);
+    let record = &board.records()[0];
+    assert_eq!(record.source, EvidenceSource::Health);
+    assert_eq!(
+        record.metadata.status,
+        ai_sre::reasoning::evidence::EvidenceStatus::Rejected
+    );
+}
