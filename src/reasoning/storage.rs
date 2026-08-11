@@ -409,6 +409,14 @@ impl JournalStore {
         &self.journal
     }
 
+    /// Rebuilds one scoped efficiency projection after replay.
+    pub fn efficiency_projection(
+        &self,
+        context: &JournalContext,
+    ) -> super::journal::EfficiencyProjection {
+        self.journal.project_scoped(context)
+    }
+
     /// Returns the backing database path without exposing contents.
     pub fn path(&self) -> &Path {
         &self.path

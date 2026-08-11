@@ -146,6 +146,15 @@ impl IncidentJournal {
 
     /// Rebuilds efficiency metrics from raw facts only.
     pub fn project(&self) -> EfficiencyProjection {
+        self.project_matching(|_| true)
+    }
+
+    /// Rebuilds one incident/run projection from raw scoped facts only.
+    pub fn project_scoped(&self, context: &JournalContext) -> EfficiencyProjection {
+        self.project_matching(|entry| entry.context.as_ref() == Some(context))
+    }
+
+    fn project_matching(&self, include: impl Fn(&JournalEntry) -> bool) -> EfficiencyProjection {
         let mut projection = EfficiencyProjection::default();
         let mut phase_starts = [
             (Phase::Investigation, None),
@@ -154,6 +163,9 @@ impl IncidentJournal {
             (Phase::Execution, None),
         ];
         for entry in &self.entries {
+            if !include(entry) {
+                continue;
+            }
             match &entry.event {
                 JournalEvent::IncidentOpened { .. }
                 | JournalEvent::AlertDeduplicated { .. }

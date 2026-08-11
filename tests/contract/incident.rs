@@ -198,3 +198,48 @@ fn cost_reservation_rejects_overcommitment_without_partial_scope_state() {
     );
     let _ = std::fs::remove_file(&path);
 }
+
+#[test]
+fn efficiency_projection_rebuilds_per_scoped_run() {
+    // Given two runs with overlapping phase names but different scopes.
+    let path =
+        std::env::temp_dir().join(format!("ai-sre-projection-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let mut store = JournalStore::open(&path).expect("open journal");
+    let first = JournalContext {
+        incident_id: "incident-projection".to_owned(),
+        run_id: "run-a".to_owned(),
+    };
+    let second = JournalContext {
+        incident_id: "incident-projection".to_owned(),
+        run_id: "run-b".to_owned(),
+    };
+    for (context, end) in [(&first, 10_u64), (&second, 30_u64)] {
+        store
+            .append_scoped(
+                JournalEvent::PhaseStarted {
+                    phase: ai_sre::reasoning::journal::Phase::Investigation,
+                    at_ms: 0,
+                },
+                Some(context),
+            )
+            .expect("append phase start");
+        store
+            .append_scoped(
+                JournalEvent::PhaseFinished {
+                    phase: ai_sre::reasoning::journal::Phase::Investigation,
+                    at_ms: end,
+                },
+                Some(context),
+            )
+            .expect("append phase finish");
+    }
+
+    // When the process rebuilds the projection for one run.
+    let projection = store.efficiency_projection(&first);
+
+    // Then unrelated run timing cannot inflate this run's metrics.
+    assert_eq!(projection.active_machine_ms, 10);
+    assert_eq!(store.efficiency_projection(&second).active_machine_ms, 30);
+    let _ = std::fs::remove_file(&path);
+}
