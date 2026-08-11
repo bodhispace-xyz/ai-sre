@@ -35,6 +35,7 @@ pub struct IncidentRuntime {
     run: ReasoningRun,
     evidence: EvidenceBoard,
     journal: IncidentJournal,
+    last_report: Option<DiagnosticReport>,
 }
 
 impl IncidentRuntime {
@@ -44,6 +45,7 @@ impl IncidentRuntime {
             run: ReasoningRun::new(config)?,
             evidence: EvidenceBoard::default(),
             journal: IncidentJournal::default(),
+            last_report: None,
         })
     }
 
@@ -158,6 +160,7 @@ impl IncidentRuntime {
                             .as_ref()
                             .is_ok_and(|report| report.validate_against(&evidence_ids).is_ok());
                         if valid {
+                            self.last_report = report.ok();
                             return self.succeed_provider(provider_kind, attempt.facts, at_ms);
                         }
                         self.fail_provider(
@@ -198,5 +201,10 @@ impl IncidentRuntime {
     /// Returns the append-only journal for persistence or replay.
     pub fn journal(&self) -> &IncidentJournal {
         &self.journal
+    }
+
+    /// Returns the accepted advisory report, if this run succeeded.
+    pub fn last_report(&self) -> Option<&DiagnosticReport> {
+        self.last_report.as_ref()
     }
 }

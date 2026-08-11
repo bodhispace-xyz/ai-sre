@@ -3,6 +3,9 @@
 /// Disposable typed target-gateway protocol.
 pub mod gateway;
 
+/// Shadow-report notification adapter.
+pub mod ntfy;
+
 /// Read-only Grafana adapters.
 pub mod grafana;
 

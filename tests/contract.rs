@@ -17,3 +17,6 @@ mod incident;
 
 #[path = "contract/investigation.rs"]
 mod investigation;
+
+#[path = "contract/ntfy.rs"]
+mod ntfy;

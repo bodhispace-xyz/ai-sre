@@ -38,6 +38,8 @@ pub struct InvestigationResult {
     pub evidence_ids: BTreeSet<String>,
     /// Terminal provider state.
     pub status: super::coordinator::RunStatus,
+    /// Accepted provider report, or a deterministic exhaustion explanation.
+    pub report: super::contracts::DiagnosticReport,
 }
 
 /// Failures that stop a shadow investigation before mutation is possible.
@@ -117,6 +119,14 @@ impl ShadowInvestigator {
                 .map(|record| record.evidence_id.clone())
                 .collect(),
             status,
+            report: runtime.last_report().cloned().unwrap_or_else(|| {
+                super::contracts::DiagnosticReport {
+                    summary:
+                        "No provider produced an accepted diagnosis within the incident budget."
+                            .to_owned(),
+                    evidence: Vec::new(),
+                }
+            }),
         })
     }
 
