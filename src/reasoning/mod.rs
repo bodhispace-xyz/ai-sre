@@ -5,6 +5,7 @@ pub mod contracts;
 pub mod coordinator;
 pub mod evidence;
 pub mod incident;
+pub mod investigation;
 pub mod journal;
 pub mod recorded;
 pub mod router;

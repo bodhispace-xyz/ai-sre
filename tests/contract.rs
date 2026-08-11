@@ -14,3 +14,6 @@ mod gateway;
 
 #[path = "contract/incident.rs"]
 mod incident;
+
+#[path = "contract/investigation.rs"]
+mod investigation;

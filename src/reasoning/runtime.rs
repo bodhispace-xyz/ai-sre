@@ -189,6 +189,12 @@ impl IncidentRuntime {
         &self.evidence
     }
 
+    /// Returns mutable evidence access for a capability adapter orchestrated by
+    /// the shadow investigator. The adapter remains read-only and bounded.
+    pub fn evidence_mut(&mut self) -> &mut EvidenceBoard {
+        &mut self.evidence
+    }
+
     /// Returns the append-only journal for persistence or replay.
     pub fn journal(&self) -> &IncidentJournal {
         &self.journal
