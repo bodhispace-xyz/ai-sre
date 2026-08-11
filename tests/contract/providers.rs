@@ -860,6 +860,19 @@ fn bootstrap_rejects_relative_gcx_binary_paths() {
 }
 
 #[test]
+fn bootstrap_rejects_relative_read_only_context_paths() {
+    // Given a read-only Git context executable that depends on the service cwd.
+    let mut config = AppConfig::default();
+    config.read_only.git_binary = std::path::PathBuf::from("git");
+
+    // When startup validation checks deployment-owned context boundaries.
+    let result = config.validate();
+
+    // Then the context adapter fails closed before any process is assembled.
+    assert_eq!(result, Err(ConfigError::RelativeReadOnlyPath));
+}
+
+#[test]
 fn bootstrap_builds_valid_non_secret_dependencies() {
     // Given the default versioned policy and resource limits.
     let config = AppConfig::default();
