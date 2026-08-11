@@ -9,7 +9,7 @@ use tokio::time::timeout;
 
 use thiserror::Error;
 
-use crate::adapters::grafana::context::{ContextError, GrafanaContext};
+use crate::adapters::grafana::context::{ContextBudget, ContextError, GrafanaContext};
 
 use super::{
     budget::Reservation,
@@ -110,14 +110,21 @@ pub async fn investigate_live(
         Some(&context),
     )?;
     let mut collected = super::evidence::EvidenceBoard::default();
+    let mut context_budget = ContextBudget::new(2);
     let remaining = runtime.remaining().ok_or(InvestigationError::Deadline)?;
-    timeout(remaining, grafana.logs(&mut collected, queries.logs))
-        .await
-        .map_err(|_| InvestigationError::Deadline)??;
+    timeout(
+        remaining,
+        grafana.logs_with_budget(&mut collected, &mut context_budget, queries.logs),
+    )
+    .await
+    .map_err(|_| InvestigationError::Deadline)??;
     let remaining = runtime.remaining().ok_or(InvestigationError::Deadline)?;
-    timeout(remaining, grafana.metrics(&mut collected, queries.metrics))
-        .await
-        .map_err(|_| InvestigationError::Deadline)??;
+    timeout(
+        remaining,
+        grafana.metrics_with_budget(&mut collected, &mut context_budget, queries.metrics),
+    )
+    .await
+    .map_err(|_| InvestigationError::Deadline)??;
     for record in collected.records() {
         runtime.commit_evidence(
             record.source,

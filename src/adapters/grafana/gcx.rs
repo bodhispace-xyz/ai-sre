@@ -3,12 +3,13 @@
 //! This module produces literal argument vectors. It does not invoke a shell,
 //! accept arbitrary subcommands, or expose Grafana's generic API surface.
 
-use std::{path::PathBuf, time::Duration};
+use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use thiserror::Error;
 use tokio::{
     io::{AsyncRead, AsyncReadExt},
     process::Command,
+    sync::Semaphore,
     time,
 };
 
@@ -42,6 +43,9 @@ pub enum GcxRunError {
     /// The child exited unsuccessfully; stderr is intentionally not retained.
     #[error("gcx process exited unsuccessfully with status {0}")]
     NonZeroExit(i32),
+    /// The shared GCX concurrency gate was closed unexpectedly.
+    #[error("gcx concurrency gate is unavailable")]
+    ConcurrencyUnavailable,
 }
 
 /// Bounded output returned by a successful `gcx` invocation.
@@ -58,6 +62,7 @@ pub struct GcxRunner {
     timeout: Duration,
     max_output_bytes: usize,
     max_query_bytes: usize,
+    concurrency: Arc<Semaphore>,
 }
 
 impl GcxRunner {
@@ -68,6 +73,7 @@ impl GcxRunner {
             timeout,
             max_output_bytes,
             max_query_bytes: 4_096,
+            concurrency: Arc::new(Semaphore::new(4)),
         }
     }
 
@@ -77,9 +83,21 @@ impl GcxRunner {
         self
     }
 
+    /// Sets the maximum number of concurrent GCX child processes.
+    pub fn with_max_concurrency(mut self, max_concurrency: usize) -> Self {
+        self.concurrency = Arc::new(Semaphore::new(max_concurrency.max(1)));
+        self
+    }
+
     /// Executes one typed query without invoking a shell.
     pub async fn run(&self, query: &GcxQuery) -> Result<GcxOutput, GcxRunError> {
         query.validate(self.max_query_bytes)?;
+        let _permit = self
+            .concurrency
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| GcxRunError::ConcurrencyUnavailable)?;
         let mut command = Command::new(&self.binary);
         command
             .args(query.argv())

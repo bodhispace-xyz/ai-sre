@@ -23,6 +23,29 @@ pub struct GrafanaContext {
     config: GrafanaContextConfig,
 }
 
+/// Per-investigation allowance for read-only Grafana requests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextBudget {
+    remaining_queries: usize,
+}
+
+impl ContextBudget {
+    /// Creates a budget that permits at most `max_queries` requests.
+    pub const fn new(max_queries: usize) -> Self {
+        Self {
+            remaining_queries: max_queries,
+        }
+    }
+
+    fn consume(&mut self) -> Result<(), ContextError> {
+        let Some(remaining) = self.remaining_queries.checked_sub(1) else {
+            return Err(ContextError::QueryBudgetExceeded);
+        };
+        self.remaining_queries = remaining;
+        Ok(())
+    }
+}
+
 impl GrafanaContext {
     /// Creates a context service with fixed datasource policy.
     pub fn new(runner: GcxRunner, config: GrafanaContextConfig) -> Self {
@@ -57,6 +80,28 @@ impl GrafanaContext {
         .await
     }
 
+    /// Executes a LogQL query after consuming one per-investigation budget token.
+    pub async fn logs_with_budget(
+        &self,
+        board: &mut EvidenceBoard,
+        budget: &mut ContextBudget,
+        expression: impl Into<String>,
+    ) -> Result<String, ContextError> {
+        budget.consume()?;
+        self.logs(board, expression).await
+    }
+
+    /// Executes a PromQL query after consuming one per-investigation budget token.
+    pub async fn metrics_with_budget(
+        &self,
+        board: &mut EvidenceBoard,
+        budget: &mut ContextBudget,
+        expression: impl Into<String>,
+    ) -> Result<String, ContextError> {
+        budget.consume()?;
+        self.metrics(board, expression).await
+    }
+
     async fn query(
         &self,
         board: &mut EvidenceBoard,
@@ -82,4 +127,26 @@ pub enum ContextError {
     /// The tool returned no commit-worthy evidence.
     #[error("Grafana context evidence could not be committed")]
     Evidence(#[from] EvidenceError),
+    /// The investigation exhausted its bounded read-only query allowance.
+    #[error("Grafana context query budget exhausted")]
+    QueryBudgetExceeded,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ContextBudget, ContextError};
+
+    #[test]
+    fn context_budget_is_exhausted_without_underflow() {
+        // Given a per-investigation budget containing one query.
+        let mut budget = ContextBudget::new(1);
+
+        // When the first query consumes the allowance and a second is attempted.
+        let first = budget.consume();
+        let second = budget.consume();
+
+        // Then the first succeeds and exhaustion fails closed.
+        assert_eq!(first, Ok(()));
+        assert_eq!(second, Err(ContextError::QueryBudgetExceeded));
+    }
 }
