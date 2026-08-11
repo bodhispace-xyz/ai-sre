@@ -8,9 +8,10 @@ use ai_sre::adapters::llm::{
 use ai_sre::reasoning::budget::{BudgetConfig, BudgetError, BudgetState, Reservation};
 use ai_sre::reasoning::contracts::{ContractError, DiagnosticReport, EvidenceRef};
 use ai_sre::reasoning::coordinator::{
-    AttemptFacts, AttemptOutcome, CoordinatorError, FailureClass, ReasoningConfig, ReasoningRun,
-    RunStatus,
+    AttemptFacts, AttemptOutcome, AttemptRecord, CoordinatorError, FailureClass, ReasoningConfig,
+    ReasoningRun, RunStatus,
 };
+use ai_sre::reasoning::journal::{IncidentJournal, JournalEvent, Phase, attempt_event};
 use ai_sre::reasoning::router::{ProviderKind, ProviderOrder, next_provider, next_provider_in};
 
 #[test]
@@ -335,4 +336,55 @@ fn coordinator_preserves_unknown_cost_in_attempt_facts() {
         AttemptOutcome::Failed(FailureClass::TemporarilyUnavailable)
     );
     assert_eq!(run.attempts()[0].facts.cost_micro_usd, None);
+}
+
+#[test]
+fn journal_replay_derives_efficiency_without_turning_unknown_cost_into_zero() {
+    // Given raw phase boundaries and two provider attempts.
+    let mut journal = IncidentJournal::default();
+    journal.append(JournalEvent::PhaseStarted {
+        phase: Phase::Reasoning,
+        at_ms: 100,
+    });
+    journal.append(attempt_event(AttemptRecord {
+        provider: ProviderKind::OpenAi,
+        outcome: AttemptOutcome::Failed(FailureClass::TemporarilyUnavailable),
+        facts: AttemptFacts {
+            elapsed_ms: 800,
+            tokens: Some(120),
+            evidence_queries: 3,
+            cost_micro_usd: None,
+        },
+    }));
+    journal.append(attempt_event(AttemptRecord {
+        provider: ProviderKind::Gemini,
+        outcome: AttemptOutcome::Succeeded,
+        facts: AttemptFacts {
+            elapsed_ms: 500,
+            tokens: Some(80),
+            evidence_queries: 2,
+            cost_micro_usd: Some(2400),
+        },
+    }));
+    journal.append(JournalEvent::PhaseFinished {
+        phase: Phase::Reasoning,
+        at_ms: 1600,
+    });
+    journal.append(JournalEvent::Terminal {
+        provider: Some(ProviderKind::Gemini),
+    });
+
+    // When the immutable entries are projected into efficiency metrics.
+    let projection = journal.project();
+
+    // Then replay preserves provider time, usage, outcome, and unknown cost.
+    assert_eq!(projection.provider_attempts, 2);
+    assert_eq!(projection.provider_time_ms, 1300);
+    assert_eq!(projection.tokens, 200);
+    assert_eq!(projection.evidence_queries, 5);
+    assert_eq!(projection.known_cost_micro_usd, 2400);
+    assert_eq!(projection.unknown_cost_attempts, 1);
+    assert_eq!(projection.terminal_provider, Some(ProviderKind::Gemini));
+    assert_eq!(journal.entries()[0].sequence, 0);
+    assert_eq!(journal.entries()[4].sequence, 4);
 }

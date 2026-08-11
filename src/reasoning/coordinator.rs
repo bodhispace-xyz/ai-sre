@@ -5,6 +5,7 @@
 
 use std::collections::BTreeSet;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::{
@@ -31,7 +32,7 @@ pub enum RunStatus {
 }
 
 /// Safe provider failure classes recorded in the incident journal.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FailureClass {
     /// Credentials must be reauthenticated before this provider can run.
     AuthenticationRequired,
@@ -44,7 +45,7 @@ pub enum FailureClass {
 }
 
 /// Measured facts captured for one provider attempt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct AttemptFacts {
     /// End-to-end adapter time in milliseconds.
     pub elapsed_ms: u64,
@@ -57,7 +58,7 @@ pub struct AttemptFacts {
 }
 
 /// Journal-ready result for one complete provider run.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AttemptOutcome {
     /// The provider returned an accepted report.
     Succeeded,
@@ -66,7 +67,7 @@ pub enum AttemptOutcome {
 }
 
 /// Immutable efficiency facts for one attempted provider.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttemptRecord {
     /// Provider selected for this complete run.
     pub provider: ProviderKind,
