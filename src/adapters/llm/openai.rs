@@ -17,8 +17,12 @@ use rig_core::{
     completion::{AssistantContent, CompletionModel, ToolDefinition},
 };
 
-use crate::reasoning::live::{LiveCompletion, LiveProvider};
-use crate::reasoning::{contracts::DiagnosticReport, coordinator::FailureClass};
+use crate::reasoning::live::{LiveCompletion, LiveProvider, LiveTurn};
+use crate::reasoning::{
+    contracts::DiagnosticReport,
+    coordinator::FailureClass,
+    tools::{ToolCall, parse_tool_call},
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -256,6 +260,17 @@ pub fn rig_client(
     )
 }
 
+/// Converts a Rig tool call into the provider-neutral allowlisted contract.
+pub fn normalize_rig_tool_call(
+    call: &rig_core::completion::message::ToolCall,
+) -> Result<ToolCall, crate::reasoning::tools::ToolLoopError> {
+    parse_tool_call(
+        call.call_id.as_deref().unwrap_or(&call.id),
+        &call.function.name,
+        &call.function.arguments.to_string(),
+    )
+}
+
 /// Executes one OpenAI reasoning request with a refreshed short-lived token.
 ///
 /// Rig remains entirely inside this adapter; core receives only normalized
@@ -263,7 +278,7 @@ pub fn rig_client(
 pub async fn complete_with_rig(
     access_token: impl Into<String>,
     prompt: &str,
-) -> Result<(DiagnosticReport, Option<u64>), FailureClass> {
+) -> Result<LiveTurn, FailureClass> {
     let client = rig_client(access_token).map_err(|_| FailureClass::TemporarilyUnavailable)?;
     let model = client.completion_model(rig_core::providers::chatgpt::GPT_5_4);
     let request = model
@@ -283,17 +298,28 @@ pub async fn complete_with_rig(
         .completion(request)
         .await
         .map_err(classify_rig_failure)?;
-    let json = response
-        .choice
-        .iter()
-        .filter_map(|content| match content {
-            AssistantContent::Text(text) => Some(text.text.as_str()),
-            _ => None,
-        })
-        .collect::<String>();
+    let mut calls = Vec::new();
+    let mut text = String::new();
+    for content in response.choice.iter() {
+        match content {
+            AssistantContent::Text(value) => text.push_str(&value.text),
+            AssistantContent::ToolCall(call) => calls
+                .push(normalize_rig_tool_call(call).map_err(|_| FailureClass::MalformedResponse)?),
+            _ => {}
+        }
+    }
+    if !calls.is_empty() {
+        return Ok(LiveTurn::ToolCalls {
+            calls,
+            tokens: Some(response.usage.total_tokens),
+        });
+    }
     let report =
-        DiagnosticReport::from_provider_json(&json).map_err(|_| FailureClass::MalformedResponse)?;
-    Ok((report, Some(response.usage.total_tokens)))
+        DiagnosticReport::from_provider_json(&text).map_err(|_| FailureClass::MalformedResponse)?;
+    Ok(LiveTurn::Final {
+        report,
+        tokens: Some(response.usage.total_tokens),
+    })
 }
 
 /// Refreshes the cached session, atomically persists rotation, then completes.
@@ -325,12 +351,62 @@ pub async fn refresh_and_complete(
             CacheError::Invalid => FailureClass::AuthenticationRequired,
             CacheError::Io => FailureClass::TemporarilyUnavailable,
         })?;
-    complete_with_rig(refreshed.access_token, prompt).await
+    match complete_with_rig(refreshed.access_token, prompt).await? {
+        LiveTurn::Final { report, tokens } => Ok((report, tokens)),
+        LiveTurn::ToolCalls { .. } => Err(FailureClass::MalformedResponse),
+    }
+}
+
+/// Refreshes the session and resumes the same investigation with tool results.
+pub async fn refresh_and_resume(
+    oauth: &OpenAiOAuth,
+    cache: &AuthCache,
+    prompt: &str,
+    results: &[crate::reasoning::tools::ToolResult],
+) -> Result<LiveTurn, FailureClass> {
+    let result_text =
+        serde_json::to_string(results).map_err(|_| FailureClass::MalformedResponse)?;
+    let resumed_prompt = format!(
+        "{prompt}\nContext tool results for this same investigation:\n{result_text}\nContinue reasoning and either request another approved tool or return the final strict JSON report."
+    );
+    let session = cache
+        .load()
+        .map_err(|error| match error {
+            CacheError::Invalid => FailureClass::AuthenticationRequired,
+            CacheError::Io => FailureClass::TemporarilyUnavailable,
+        })?
+        .ok_or(FailureClass::AuthenticationRequired)?;
+    let refreshed = oauth
+        .refresh(&session)
+        .await
+        .map_err(|failure| match failure {
+            RefreshFailure::ReauthenticationRequired => FailureClass::AuthenticationRequired,
+            RefreshFailure::TemporarilyUnavailable => FailureClass::TemporarilyUnavailable,
+        })?;
+    cache
+        .store(&RefreshSession::new(refreshed.refresh_token))
+        .map_err(|error| match error {
+            CacheError::Invalid => FailureClass::AuthenticationRequired,
+            CacheError::Io => FailureClass::TemporarilyUnavailable,
+        })?;
+    complete_with_rig(refreshed.access_token, &resumed_prompt).await
 }
 
 impl<'a> LiveProvider for (&'a OpenAiOAuth, &'a AuthCache) {
     fn complete<'b>(&'b self, prompt: &'b str) -> LiveCompletion<'b> {
-        Box::pin(async move { refresh_and_complete(self.0, self.1, prompt).await })
+        Box::pin(async move {
+            refresh_and_complete(self.0, self.1, prompt)
+                .await
+                .map(|(report, tokens)| LiveTurn::Final { report, tokens })
+        })
+    }
+
+    fn complete_with_results<'b>(
+        &'b self,
+        prompt: &'b str,
+        results: &'b [crate::reasoning::tools::ToolResult],
+    ) -> LiveCompletion<'b> {
+        Box::pin(async move { refresh_and_resume(self.0, self.1, prompt, results).await })
     }
 }
 

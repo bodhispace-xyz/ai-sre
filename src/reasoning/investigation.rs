@@ -17,11 +17,12 @@ use super::{
     budget::Reservation,
     incident::IncidentSignal,
     journal::{JournalContext, JournalEvent, Phase},
-    live::{LiveProviders, run_live_with_alert_name},
+    live::LiveProviders,
     recorded::RecordedProvider,
     router::ProviderKind,
     runtime::{IncidentRuntime, RuntimeError},
     storage::{JournalStore, JournalStoreError},
+    tools::{ToolCall, ToolLoop, ToolLoopError, ToolResult, ToolResultClass},
 };
 
 /// Explicit read-only queries selected for one shadow investigation.
@@ -61,6 +62,89 @@ pub enum InvestigationError {
     /// The incident wall-clock budget expired before completion.
     #[error("shadow investigation wall-clock budget expired")]
     Deadline,
+}
+
+/// Executes one admitted provider tool call and transfers immutable evidence
+/// from the adapter board into the incident runtime.
+pub async fn execute_model_tool(
+    grafana: &GrafanaContext,
+    runtime: &mut IncidentRuntime,
+    board: &mut super::evidence::EvidenceBoard,
+    context_budget: &mut ContextBudget,
+    loop_state: &mut ToolLoop,
+    call: &ToolCall,
+) -> Result<ToolResult, InvestigationError> {
+    if let Err(error) = loop_state.admit(call) {
+        let class = if matches!(error, ToolLoopError::TurnLimit) {
+            ToolResultClass::Exhausted
+        } else {
+            ToolResultClass::Denied
+        };
+        let result = ToolResult {
+            call_id: call.call_id.clone(),
+            class,
+            evidence_id: None,
+            detail: error.to_string(),
+        };
+        loop_state.record_result(result.clone());
+        return Ok(result);
+    }
+    if runtime.reserve_evidence_query().is_err() {
+        let result = ToolResult {
+            call_id: call.call_id.clone(),
+            class: ToolResultClass::Exhausted,
+            evidence_id: None,
+            detail: "incident evidence-query budget exhausted".to_owned(),
+        };
+        loop_state.record_result(result.clone());
+        return Ok(result);
+    }
+    let Some(remaining) = runtime.remaining() else {
+        let result = ToolResult {
+            call_id: call.call_id.clone(),
+            class: ToolResultClass::Exhausted,
+            evidence_id: None,
+            detail: "incident deadline exhausted before context query".to_owned(),
+        };
+        loop_state.record_result(result.clone());
+        return Ok(result);
+    };
+    let mut result =
+        tokio::time::timeout(remaining, grafana.execute_tool(board, context_budget, call))
+            .await
+            .unwrap_or_else(|_| ToolResult {
+                call_id: call.call_id.clone(),
+                class: ToolResultClass::Exhausted,
+                evidence_id: None,
+                detail: "incident deadline exhausted during context query".to_owned(),
+            });
+    if result.class == ToolResultClass::Succeeded {
+        if let Some(evidence_id) = &result.evidence_id {
+            if let Some(record) = board
+                .records()
+                .iter()
+                .find(|record| &record.evidence_id == evidence_id)
+            {
+                let runtime_evidence_id = runtime.commit_evidence(
+                    record.source,
+                    record.query.clone(),
+                    record.payload.clone(),
+                    runtime.elapsed_ms(),
+                )?;
+                result.evidence_id = Some(runtime_evidence_id);
+                result.detail = redact_text(&String::from_utf8_lossy(&record.payload));
+                if result.detail.len() > 16_384 {
+                    let mut limit = 16_384;
+                    while !result.detail.is_char_boundary(limit) {
+                        limit -= 1;
+                    }
+                    result.detail.truncate(limit);
+                }
+            }
+        }
+    }
+    loop_state.record_result(result.clone());
+    Ok(result)
 }
 
 /// Inputs for one live-provider investigation.
@@ -113,12 +197,12 @@ pub async fn investigate_live(
     )?;
     let mut collected = super::evidence::EvidenceBoard::default();
     let mut context_budget = ContextBudget::new(runtime.max_evidence_queries() as usize);
-    let remaining = runtime.remaining().ok_or(InvestigationError::Deadline)?;
     let requests = [
         ReadOnlyRequest::Logs(queries.logs),
         ReadOnlyRequest::Metrics(queries.metrics),
     ];
     for request in requests {
+        let remaining = runtime.remaining().ok_or(InvestigationError::Deadline)?;
         let result = timeout(remaining, async {
             match request {
                 ReadOnlyRequest::Logs(expression) => {
@@ -156,14 +240,19 @@ pub async fn investigate_live(
         Some(&context),
     )?;
     let prompt = build_prompt(signal, runtime);
-    let status = run_live_with_alert_name(
+    let mut tool_board = super::evidence::EvidenceBoard::default();
+    let mut tool_context_budget = ContextBudget::new(runtime.max_evidence_queries() as usize);
+    let status = run_live_with_context(ContextLiveInput {
         runtime,
         providers,
-        &prompt,
-        &signal.alert_name,
+        grafana,
+        board: &mut tool_board,
+        context_budget: &mut tool_context_budget,
+        prompt: &prompt,
+        alert_name: &signal.alert_name,
         reservation,
         start_at_ms,
-    )
+    })
     .await?;
     for entry in runtime.journal().entries() {
         journal.append_scoped(entry.event.clone(), Some(&context))?;
@@ -185,6 +274,178 @@ pub async fn investigate_live(
             }
         }),
     })
+}
+
+/// Runs provider turns and resumes the same provider after each context result.
+struct ContextLiveInput<'a> {
+    runtime: &'a mut IncidentRuntime,
+    providers: LiveProviders<'a>,
+    grafana: &'a GrafanaContext,
+    board: &'a mut super::evidence::EvidenceBoard,
+    context_budget: &'a mut ContextBudget,
+    prompt: &'a str,
+    alert_name: &'a str,
+    reservation: Reservation,
+    start_at_ms: u64,
+}
+
+async fn run_live_with_context(
+    input: ContextLiveInput<'_>,
+) -> Result<super::coordinator::RunStatus, RuntimeError> {
+    let ContextLiveInput {
+        runtime,
+        providers,
+        grafana,
+        board,
+        context_budget,
+        prompt,
+        alert_name,
+        reservation,
+        start_at_ms,
+    } = input;
+    let mut at_ms = start_at_ms;
+    loop {
+        let provider = match runtime.admit_provider(reservation, at_ms)? {
+            Some(provider) => provider,
+            None => return Ok(super::coordinator::RunStatus::Exhausted),
+        };
+        let mut loop_state = ToolLoop::new(
+            super::tools::ToolTurnPolicy::new(runtime.max_tool_turns()).map_err(|_| {
+                RuntimeError::Coordination(super::coordinator::CoordinatorError::InvalidOrder(
+                    "tool turn limit",
+                ))
+            })?,
+        );
+        let mut turn = match runtime.remaining() {
+            Some(remaining) => timeout(
+                remaining,
+                provider_turn(&providers, provider, prompt, &[], alert_name),
+            )
+            .await
+            .unwrap_or(Err(
+                super::coordinator::FailureClass::TemporarilyUnavailable,
+            )),
+            None => Err(super::coordinator::FailureClass::TemporarilyUnavailable),
+        };
+        loop {
+            let started = std::time::Instant::now();
+            match turn {
+                Ok(super::live::LiveTurn::Final { report, tokens }) => {
+                    let facts = super::coordinator::AttemptFacts {
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                        tokens,
+                        evidence_queries: loop_state.results().len() as u32,
+                        ..Default::default()
+                    };
+                    let evidence_ids = runtime
+                        .evidence()
+                        .records()
+                        .iter()
+                        .map(|record| record.evidence_id.clone())
+                        .collect::<BTreeSet<_>>();
+                    if report.validate_against(&evidence_ids).is_ok() {
+                        return runtime
+                            .succeed_provider_with_report(provider, report, facts, at_ms);
+                    }
+                    runtime.fail_provider(
+                        provider,
+                        super::coordinator::FailureClass::MalformedResponse,
+                        facts,
+                        at_ms,
+                    )?;
+                    break;
+                }
+                Ok(super::live::LiveTurn::ToolCalls { calls, .. }) => {
+                    if calls.is_empty() {
+                        let facts = super::coordinator::AttemptFacts {
+                            elapsed_ms: started.elapsed().as_millis() as u64,
+                            evidence_queries: loop_state.results().len() as u32,
+                            ..Default::default()
+                        };
+                        runtime.fail_provider(
+                            provider,
+                            super::coordinator::FailureClass::MalformedResponse,
+                            facts,
+                            at_ms,
+                        )?;
+                        break;
+                    }
+                    for call in calls {
+                        let _ = execute_model_tool(
+                            grafana,
+                            runtime,
+                            board,
+                            context_budget,
+                            &mut loop_state,
+                            &call,
+                        )
+                        .await
+                        .map_err(|error| {
+                            RuntimeError::Evidence(match error {
+                                InvestigationError::Context(ContextError::Evidence(e)) => e,
+                                _ => crate::reasoning::evidence::EvidenceError::EmptyPayload,
+                            })
+                        })?;
+                    }
+                    turn = match runtime.remaining() {
+                        Some(remaining) => timeout(
+                            remaining,
+                            provider_turn(
+                                &providers,
+                                provider,
+                                prompt,
+                                loop_state.results(),
+                                alert_name,
+                            ),
+                        )
+                        .await
+                        .unwrap_or(Err(
+                            super::coordinator::FailureClass::TemporarilyUnavailable,
+                        )),
+                        None => Err(super::coordinator::FailureClass::TemporarilyUnavailable),
+                    };
+                    continue;
+                }
+                Err(failure) => {
+                    let facts = super::coordinator::AttemptFacts {
+                        elapsed_ms: started.elapsed().as_millis() as u64,
+                        evidence_queries: loop_state.results().len() as u32,
+                        ..Default::default()
+                    };
+                    runtime.fail_provider(provider, failure, facts, at_ms)?;
+                    break;
+                }
+            }
+        }
+        at_ms = runtime.elapsed_ms();
+    }
+}
+
+async fn provider_turn<'a>(
+    providers: &LiveProviders<'a>,
+    provider: ProviderKind,
+    prompt: &'a str,
+    results: &'a [ToolResult],
+    alert_name: &'a str,
+) -> Result<super::live::LiveTurn, super::coordinator::FailureClass> {
+    match provider {
+        ProviderKind::OpenAi => match providers.openai {
+            Some(provider) => provider.complete_with_results(prompt, results).await,
+            None => Err(super::coordinator::FailureClass::TemporarilyUnavailable),
+        },
+        ProviderKind::Gemini => match providers.gemini {
+            Some(provider) => provider.complete_with_results(prompt, results).await,
+            None => Err(super::coordinator::FailureClass::TemporarilyUnavailable),
+        },
+        ProviderKind::DeepSeek => match providers.deepseek {
+            Some(provider) => provider.complete_with_results(prompt, results).await,
+            None => Err(super::coordinator::FailureClass::TemporarilyUnavailable),
+        },
+        ProviderKind::Deterministic => Ok(super::live::LiveTurn::Final {
+            report: super::baseline::build_report(alert_name, &BTreeSet::new()),
+            tokens: None,
+        }),
+    }
 }
 
 fn build_prompt(signal: &IncidentSignal, runtime: &IncidentRuntime) -> String {

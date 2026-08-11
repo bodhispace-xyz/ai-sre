@@ -138,5 +138,6 @@ pub fn reasoning_config(order: ProviderOrder, budget: BudgetConfig) -> Reasoning
     ReasoningConfig {
         provider_order: order,
         budget,
+        max_tool_turns: 4,
     }
 }

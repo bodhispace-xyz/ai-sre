@@ -4,6 +4,7 @@
 //! execute arbitrary commands, mutate Grafana, or expose credentials to core.
 
 use crate::reasoning::evidence::{EvidenceBoard, EvidenceError, EvidenceSource};
+use crate::reasoning::tools::{ContextTool, ToolCall, ToolResult, ToolResultClass};
 
 use super::gcx::{GcxQuery, GcxRunError, GcxRunner};
 
@@ -109,6 +110,63 @@ impl GrafanaContext {
     ) -> Result<String, ContextError> {
         budget.consume()?;
         self.metrics(board, expression).await
+    }
+
+    /// Executes one validated model tool call and returns a safe result envelope.
+    pub async fn execute_tool(
+        &self,
+        board: &mut EvidenceBoard,
+        budget: &mut ContextBudget,
+        call: &ToolCall,
+    ) -> ToolResult {
+        let result = match call.tool {
+            ContextTool::QueryLogs => {
+                self.logs_with_budget(board, budget, call.query.clone())
+                    .await
+            }
+            ContextTool::QueryMetrics => {
+                self.metrics_with_budget(board, budget, call.query.clone())
+                    .await
+            }
+        };
+        match result {
+            Ok(evidence_id) => ToolResult {
+                call_id: call.call_id.clone(),
+                class: ToolResultClass::Succeeded,
+                evidence_id: Some(evidence_id),
+                detail: "bounded evidence committed".to_owned(),
+            },
+            Err(ContextError::QueryBudgetExceeded) => ToolResult {
+                call_id: call.call_id.clone(),
+                class: ToolResultClass::Exhausted,
+                evidence_id: None,
+                detail: "context query budget exhausted".to_owned(),
+            },
+            Err(ContextError::Gcx(GcxRunError::OutputLimitExceeded)) => ToolResult {
+                call_id: call.call_id.clone(),
+                class: ToolResultClass::Truncated,
+                evidence_id: None,
+                detail: "context output exceeded its bound".to_owned(),
+            },
+            Err(ContextError::Gcx(GcxRunError::InvalidQuery)) => ToolResult {
+                call_id: call.call_id.clone(),
+                class: ToolResultClass::Denied,
+                evidence_id: None,
+                detail: "query rejected by context policy".to_owned(),
+            },
+            Err(ContextError::Gcx(_)) => ToolResult {
+                call_id: call.call_id.clone(),
+                class: ToolResultClass::Unavailable,
+                evidence_id: None,
+                detail: "context backend unavailable".to_owned(),
+            },
+            Err(_) => ToolResult {
+                call_id: call.call_id.clone(),
+                class: ToolResultClass::Denied,
+                evidence_id: None,
+                detail: "context query failed safely".to_owned(),
+            },
+        }
     }
 
     /// Executes a bounded batch of model-directed read-only requests.

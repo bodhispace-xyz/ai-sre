@@ -268,7 +268,7 @@ impl GcxQuery {
                 expression.contains("{}") || expression.contains("=~\".*\"") || expression == "*"
             }
         };
-        if invalid_semantics {
+        if invalid_semantics || expression.contains("=~\".*\"") || expression.contains("=~'.*'") {
             return Err(GcxRunError::InvalidQuery);
         }
         Ok(())

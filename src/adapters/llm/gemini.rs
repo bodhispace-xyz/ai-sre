@@ -5,7 +5,7 @@ use std::time::Instant;
 
 use crate::reasoning::contracts::{ContractError, DiagnosticReport};
 use crate::reasoning::coordinator::{AttemptFacts, FailureClass};
-use crate::reasoning::live::{LiveCompletion, LiveProvider};
+use crate::reasoning::live::{LiveCompletion, LiveProvider, LiveTurn};
 
 use super::{ApiKey, ProviderFailure, REQUEST_TIMEOUT, bounded_response_body, classify_status};
 
@@ -99,7 +99,10 @@ impl LiveProvider for GeminiClient {
         Box::pin(async move {
             self.complete_for_runtime(prompt)
                 .await
-                .map(|(report, facts)| (report, facts.tokens))
+                .map(|(report, facts)| LiveTurn::Final {
+                    report,
+                    tokens: facts.tokens,
+                })
         })
     }
 }

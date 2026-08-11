@@ -260,6 +260,7 @@ fn coordinator_reserves_before_each_restart_and_ends_in_baseline() {
             max_provider_calls: 2,
             ..BudgetConfig::default()
         },
+        max_tool_turns: 4,
     };
     let mut run = ReasoningRun::new(config).expect("valid run configuration");
     let reservation = Reservation {
@@ -424,6 +425,7 @@ fn incident_runtime_emits_evidence_attempt_and_terminal_journal_facts() {
             providers: vec![ProviderKind::Deterministic],
         },
         budget: BudgetConfig::default(),
+        max_tool_turns: 4,
     };
     let mut runtime = IncidentRuntime::new(config).expect("runtime config");
 
