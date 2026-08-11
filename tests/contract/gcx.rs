@@ -53,6 +53,33 @@ fn logs_query_cannot_select_an_arbitrary_gcx_command() {
     assert_eq!(query.kind(), QueryKind::Logs);
 }
 
+#[test]
+fn model_authored_queries_are_rejected_before_any_process_is_spawned() {
+    // Given a query containing shell syntax and an arbitrary datasource URL.
+    let query = GcxQuery::logs("{app=\"api\"}; cat /etc/passwd", "https://evil.example");
+
+    // When the read-only query policy validates the request.
+    let result = query.validate(4_096);
+
+    // Then policy rejects it before the process boundary is reachable.
+    assert_eq!(result, Err(GcxRunError::InvalidQuery));
+}
+
+#[test]
+fn valid_logql_pipes_and_promql_selectors_remain_data() {
+    // Given ordinary LogQL and PromQL syntax that includes operators.
+    let logs = GcxQuery::logs("{app=\"api\"} |= \"error\"", "loki");
+    let metrics = GcxQuery::metrics("rate(http_requests_total{job=\"api\"}[5m])", "prometheus");
+
+    // When the bounded query policy validates both expressions.
+    let logs_result = logs.validate(4_096);
+    let metrics_result = metrics.validate(4_096);
+
+    // Then query-language operators are accepted as data, not shell syntax.
+    assert_eq!(logs_result, Ok(()));
+    assert_eq!(metrics_result, Ok(()));
+}
+
 #[tokio::test]
 async fn runner_returns_bounded_stdout_from_a_successful_process() {
     // Given a harmless fixture process and a small output budget.

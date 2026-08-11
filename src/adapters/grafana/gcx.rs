@@ -24,6 +24,9 @@ pub enum QueryKind {
 /// Classified failures at the `gcx` process boundary.
 #[derive(Debug, Clone, Copy, Error, PartialEq, Eq)]
 pub enum GcxRunError {
+    /// The query or datasource violated the read-only context policy.
+    #[error("gcx query was rejected by policy")]
+    InvalidQuery,
     /// The child process could not be started.
     #[error("gcx process could not be started")]
     SpawnFailed,
@@ -54,6 +57,7 @@ pub struct GcxRunner {
     binary: PathBuf,
     timeout: Duration,
     max_output_bytes: usize,
+    max_query_bytes: usize,
 }
 
 impl GcxRunner {
@@ -63,11 +67,19 @@ impl GcxRunner {
             binary: binary.into(),
             timeout,
             max_output_bytes,
+            max_query_bytes: 4_096,
         }
+    }
+
+    /// Overrides the maximum UTF-8 expression size accepted by the policy.
+    pub fn with_max_query_bytes(mut self, max_query_bytes: usize) -> Self {
+        self.max_query_bytes = max_query_bytes;
+        self
     }
 
     /// Executes one typed query without invoking a shell.
     pub async fn run(&self, query: &GcxQuery) -> Result<GcxOutput, GcxRunError> {
+        query.validate(self.max_query_bytes)?;
         let mut command = Command::new(&self.binary);
         command
             .args(query.argv())
@@ -192,5 +204,37 @@ impl GcxQuery {
                 datasource.clone(),
             ],
         }
+    }
+
+    /// Validates model-authored query data before process execution.
+    pub fn validate(&self, max_expression_bytes: usize) -> Result<(), GcxRunError> {
+        let (expression, datasource) = match self {
+            Self::Logs {
+                expression,
+                datasource,
+            }
+            | Self::Metrics {
+                expression,
+                datasource,
+            } => (expression, datasource),
+        };
+        if expression.is_empty()
+            || expression.len() > max_expression_bytes
+            || datasource.is_empty()
+            || datasource.len() > 128
+            || !datasource
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+            || expression.contains('\0')
+            || expression
+                .chars()
+                .any(|character| matches!(character, '\n' | '\r' | ';' | '`'))
+            || expression.contains("$(")
+            || expression.contains("&&")
+            || expression.contains("||")
+        {
+            return Err(GcxRunError::InvalidQuery);
+        }
+        Ok(())
     }
 }
