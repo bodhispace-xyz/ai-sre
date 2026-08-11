@@ -9,7 +9,6 @@ use serde::{Deserialize, Serialize};
 
 /// An incoming alert or recovery notification.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct AlertSignal {
     /// Alert status, normally `firing` or `resolved`.
     pub status: AlertStatus,
@@ -22,6 +21,20 @@ pub struct AlertSignal {
     /// Human-readable alert context.
     #[serde(default)]
     pub annotations: BTreeMap<String, String>,
+}
+
+/// Alertmanager webhook envelope accepted by the HTTP intake.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AlertmanagerWebhook {
+    /// Alerts delivered in this webhook batch.
+    #[serde(default)]
+    pub alerts: Vec<AlertSignal>,
+}
+
+/// Normalizes every alert in one Alertmanager delivery.
+pub fn normalize_webhook(webhook: AlertmanagerWebhook) -> Vec<IncidentSignal> {
+    webhook.alerts.into_iter().map(normalize).collect()
 }
 
 /// Lifecycle state carried by an incoming alert.

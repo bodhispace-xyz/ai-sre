@@ -20,3 +20,6 @@ mod investigation;
 
 #[path = "contract/ntfy.rs"]
 mod ntfy;
+
+#[path = "contract/transport.rs"]
+mod transport;
