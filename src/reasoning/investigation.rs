@@ -242,7 +242,9 @@ pub async fn investigate_live(
     let prompt = build_prompt(signal, runtime);
     let mut tool_board = super::evidence::EvidenceBoard::default();
     let mut tool_context_budget = ContextBudget::new(runtime.max_evidence_queries() as usize);
-    let status = run_live_with_context(ContextLiveInput {
+    let mut persisted_runtime_entries = 0_usize;
+    persist_runtime_events(runtime, journal, &context, &mut persisted_runtime_entries)?;
+    let run_result = run_live_with_context(ContextLiveInput {
         runtime,
         providers,
         grafana,
@@ -252,11 +254,13 @@ pub async fn investigate_live(
         alert_name: &signal.alert_name,
         reservation,
         start_at_ms,
+        journal,
+        journal_context: &context,
+        persisted_runtime_entries: &mut persisted_runtime_entries,
     })
     .await?;
-    for entry in runtime.journal().entries() {
-        journal.append_scoped(entry.event.clone(), Some(&context))?;
-    }
+    persist_runtime_events(runtime, journal, &context, &mut persisted_runtime_entries)?;
+    let status = run_result;
     Ok(InvestigationResult {
         incident_id: signal.incident_id.clone(),
         evidence_ids: runtime
@@ -287,11 +291,33 @@ struct ContextLiveInput<'a> {
     alert_name: &'a str,
     reservation: Reservation,
     start_at_ms: u64,
+    journal: &'a mut JournalStore,
+    journal_context: &'a JournalContext,
+    persisted_runtime_entries: &'a mut usize,
+}
+
+fn persist_runtime_events(
+    runtime: &IncidentRuntime,
+    journal: &mut JournalStore,
+    context: &JournalContext,
+    persisted_runtime_entries: &mut usize,
+) -> Result<(), InvestigationError> {
+    let entries = runtime.journal().entries();
+    if *persisted_runtime_entries >= entries.len() {
+        return Ok(());
+    }
+    let events = entries[*persisted_runtime_entries..]
+        .iter()
+        .map(|entry| entry.event.clone())
+        .collect::<Vec<_>>();
+    journal.append_with_outbox_scoped(&events, None, Some(context))?;
+    *persisted_runtime_entries = entries.len();
+    Ok(())
 }
 
 async fn run_live_with_context(
     input: ContextLiveInput<'_>,
-) -> Result<super::coordinator::RunStatus, RuntimeError> {
+) -> Result<super::coordinator::RunStatus, InvestigationError> {
     let ContextLiveInput {
         runtime,
         providers,
@@ -302,6 +328,9 @@ async fn run_live_with_context(
         alert_name,
         reservation,
         start_at_ms,
+        journal,
+        journal_context,
+        persisted_runtime_entries,
     } = input;
     let mut at_ms = start_at_ms;
     loop {
@@ -344,8 +373,9 @@ async fn run_live_with_context(
                         .map(|record| record.evidence_id.clone())
                         .collect::<BTreeSet<_>>();
                     if report.validate_against(&evidence_ids).is_ok() {
-                        return runtime
-                            .succeed_provider_with_report(provider, report, facts, at_ms);
+                        return Ok(
+                            runtime.succeed_provider_with_report(provider, report, facts, at_ms)?
+                        );
                     }
                     runtime.fail_provider(
                         provider,
@@ -400,6 +430,12 @@ async fn run_live_with_context(
                             evidence_queries_after,
                             at_ms: runtime.elapsed_ms(),
                         });
+                        persist_runtime_events(
+                            runtime,
+                            journal,
+                            journal_context,
+                            persisted_runtime_entries,
+                        )?;
                     }
                     turn = match runtime.remaining() {
                         Some(remaining) => timeout(
@@ -654,5 +690,195 @@ impl ShadowInvestigator {
             super::coordinator::RunStatus::Succeeded(provider) => Some(provider),
             super::coordinator::RunStatus::Exhausted => None,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::persist_runtime_events;
+    use crate::adapters::grafana::context::{ContextBudget, GrafanaContext, GrafanaContextConfig};
+    use crate::reasoning::{
+        budget::Reservation,
+        coordinator::ReasoningConfig,
+        journal::{JournalContext, ToolContextFacts, query_digest},
+        live::{LiveCompletion, LiveProvider, LiveProviders, LiveTurn},
+        router::ProviderKind,
+        runtime::IncidentRuntime,
+        storage::JournalStore,
+        tools::{ContextTool, ToolCall, ToolResultClass},
+    };
+    use std::{sync::Mutex, time::Duration};
+
+    #[test]
+    fn tool_checkpoint_survives_store_reopen() {
+        // Given a runtime with committed evidence and a completed tool fact.
+        let path = std::env::temp_dir().join(format!(
+            "ai-sre-tool-checkpoint-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let context = JournalContext {
+            incident_id: "incident-checkpoint".to_owned(),
+            run_id: "run-checkpoint".to_owned(),
+        };
+        let mut runtime = IncidentRuntime::new(ReasoningConfig::default()).expect("runtime");
+        runtime
+            .commit_evidence(
+                crate::reasoning::evidence::EvidenceSource::GrafanaLogs,
+                "{app=\"api\"}",
+                b"bounded output".to_vec(),
+                1,
+            )
+            .expect("evidence");
+        runtime.record_tool_context(ToolContextFacts {
+            provider: ProviderKind::OpenAi,
+            tool: "query_logs".to_owned(),
+            query_digest: query_digest("{app=\"api\"}"),
+            result_class: ToolResultClass::Succeeded,
+            elapsed_ms: 4,
+            output_bytes: 14,
+            evidence_queries_before: 0,
+            evidence_queries_after: 1,
+            at_ms: 4,
+        });
+        let mut store = JournalStore::open(&path).expect("store");
+        let mut persisted = 0;
+
+        // When the causal runtime events are flushed as one durable checkpoint.
+        persist_runtime_events(&runtime, &mut store, &context, &mut persisted).expect("checkpoint");
+        drop(store);
+
+        // Then replay preserves evidence and tool accounting.
+        let reopened = JournalStore::open(&path).expect("reopen");
+        let projection = reopened.efficiency_projection(&context);
+        assert_eq!(projection.tool_calls, 1);
+        assert_eq!(projection.successful_tool_calls, 1);
+        assert_eq!(reopened.journal().entries().len(), 2);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    struct ScriptedProvider {
+        turns: Mutex<u8>,
+    }
+
+    impl LiveProvider for ScriptedProvider {
+        fn complete<'a>(&'a self, _prompt: &'a str) -> LiveCompletion<'a> {
+            Box::pin(async { Err(crate::reasoning::coordinator::FailureClass::MalformedResponse) })
+        }
+
+        fn complete_with_results<'a>(
+            &'a self,
+            _prompt: &'a str,
+            results: &'a [crate::reasoning::tools::ToolResult],
+        ) -> LiveCompletion<'a> {
+            let is_first = {
+                let mut turns = self.turns.lock().expect("turn lock");
+                let first = *turns == 0;
+                *turns += 1;
+                first
+            };
+            Box::pin(async move {
+                if is_first {
+                    Ok(LiveTurn::ToolCalls {
+                        calls: vec![ToolCall {
+                            call_id: "call-1".to_owned(),
+                            tool: ContextTool::QueryLogs,
+                            query: "{app=\"api\"}".to_owned(),
+                        }],
+                        tokens: None,
+                    })
+                } else {
+                    let evidence_id = results
+                        .first()
+                        .and_then(|result| result.evidence_id.clone())
+                        .expect("tool evidence");
+                    Ok(LiveTurn::Final {
+                        report: crate::reasoning::contracts::DiagnosticReport {
+                            summary: "The API evidence is available.".to_owned(),
+                            evidence: vec![crate::reasoning::contracts::EvidenceRef {
+                                evidence_id,
+                            }],
+                        },
+                        tokens: None,
+                    })
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn live_tool_call_is_checkpointed_before_provider_resumption() {
+        // Given a scripted provider and read-only GCX adapter.
+        let path = std::env::temp_dir().join(format!(
+            "ai-sre-live-tool-checkpoint-{}.sqlite",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&path);
+        let context = JournalContext {
+            incident_id: "incident-live".to_owned(),
+            run_id: "run-live".to_owned(),
+        };
+        let mut journal = JournalStore::open(&path).expect("journal");
+        let grafana = GrafanaContext::new(
+            crate::adapters::grafana::gcx::GcxRunner::new(
+                "/bin/echo",
+                Duration::from_secs(1),
+                4096,
+            ),
+            GrafanaContextConfig {
+                logs_datasource: "loki".to_owned(),
+                metrics_datasource: "prometheus".to_owned(),
+            },
+        );
+        let provider = ScriptedProvider {
+            turns: Mutex::new(0),
+        };
+        let mut runtime = IncidentRuntime::new(ReasoningConfig::default()).expect("runtime");
+        let mut board = super::super::evidence::EvidenceBoard::default();
+        let mut budget = ContextBudget::new(3);
+        let mut persisted = 0;
+
+        // When one tool turn is executed and the provider resumes with its result.
+        let status = super::run_live_with_context(super::ContextLiveInput {
+            runtime: &mut runtime,
+            providers: LiveProviders {
+                openai: Some(&provider),
+                gemini: None,
+                deepseek: None,
+            },
+            grafana: &grafana,
+            board: &mut board,
+            context_budget: &mut budget,
+            prompt: "diagnose",
+            alert_name: "ApiDown",
+            reservation: Reservation {
+                provider_calls: 1,
+                tokens: 0,
+                evidence_queries: 0,
+                cost_micro_usd: 0,
+            },
+            start_at_ms: 0,
+            journal: &mut journal,
+            journal_context: &context,
+            persisted_runtime_entries: &mut persisted,
+        })
+        .await
+        .expect("live loop");
+        assert_eq!(
+            status,
+            crate::reasoning::coordinator::RunStatus::Succeeded(ProviderKind::OpenAi)
+        );
+        drop(journal);
+
+        // Then the reopened journal contains the tool fact before any later replay.
+        let reopened = JournalStore::open(&path).expect("reopen");
+        assert_eq!(reopened.efficiency_projection(&context).tool_calls, 1);
+        assert_eq!(
+            reopened
+                .efficiency_projection(&context)
+                .successful_tool_calls,
+            1
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }

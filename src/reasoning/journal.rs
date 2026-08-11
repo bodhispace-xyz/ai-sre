@@ -4,10 +4,8 @@
 //! entries must produce the same timing, usage, provider-path, and cost view.
 
 use serde::{Deserialize, Serialize};
-use std::{
-    collections::{BTreeSet, hash_map::DefaultHasher},
-    hash::{Hash, Hasher},
-};
+use sha2::{Digest, Sha256};
+use std::collections::BTreeSet;
 
 use super::coordinator::AttemptRecord;
 use super::router::ProviderKind;
@@ -311,7 +309,13 @@ pub fn attempt_event(attempt: AttemptRecord) -> JournalEvent {
 
 /// Produces a stable, non-secret digest suitable for journal correlation.
 pub fn query_digest(query: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    query.hash(&mut hasher);
-    format!("{:016x}", hasher.finish())
+    let mut hasher = Sha256::new();
+    hasher.update(b"ai-sre/query-digest/v1\0");
+    hasher.update(query.as_bytes());
+    let digest = hasher.finalize();
+    let encoded = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("v1-sha256:{encoded}")
 }
