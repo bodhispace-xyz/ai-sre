@@ -3,7 +3,10 @@
 //! This adapter converts tool output into core evidence records. It cannot
 //! execute arbitrary commands, mutate Grafana, or expose credentials to core.
 
-use crate::reasoning::evidence::{EvidenceBoard, EvidenceError, EvidenceSource};
+use crate::reasoning::evidence::{
+    EvidenceBoard, EvidenceError, EvidenceMetadata, EvidenceSource, EvidenceStatus,
+    MAX_EVIDENCE_QUERY_BYTES,
+};
 use crate::reasoning::tools::{ContextTool, ToolCall, ToolResult, ToolResultClass};
 
 use super::gcx::{GcxQuery, GcxRunError, GcxRunner};
@@ -129,7 +132,7 @@ impl GrafanaContext {
                     .await
             }
         };
-        match result {
+        let mut result = match result {
             Ok(evidence_id) => ToolResult {
                 call_id: call.call_id.clone(),
                 class: ToolResultClass::Succeeded,
@@ -166,7 +169,22 @@ impl GrafanaContext {
                 evidence_id: None,
                 detail: "context query failed safely".to_owned(),
             },
+        };
+        if result.evidence_id.is_none() {
+            let source = match call.tool {
+                ContextTool::QueryLogs => EvidenceSource::GrafanaLogs,
+                ContextTool::QueryMetrics => EvidenceSource::GrafanaMetrics,
+            };
+            result.evidence_id = board
+                .commit_with_metadata(
+                    source,
+                    bounded_failure_query(&call.query),
+                    b"[NO EVIDENCE]".to_vec(),
+                    failure_metadata(result.class),
+                )
+                .ok();
         }
+        result
     }
 
     /// Executes a bounded batch of model-directed read-only requests.
@@ -206,6 +224,50 @@ impl GrafanaContext {
         board
             .commit(source, expression.clone(), output.stdout)
             .map_err(ContextError::Evidence)
+    }
+}
+
+fn bounded_failure_query(query: &str) -> String {
+    if query.len() <= MAX_EVIDENCE_QUERY_BYTES {
+        query.to_owned()
+    } else {
+        "[QUERY_REDACTED]".to_owned()
+    }
+}
+
+fn failure_metadata(class: ToolResultClass) -> EvidenceMetadata {
+    let (status, truncated, error) = match class {
+        ToolResultClass::Truncated => (
+            EvidenceStatus::Partial,
+            true,
+            Some("output_limit_exceeded".to_owned()),
+        ),
+        ToolResultClass::Denied => (
+            EvidenceStatus::Rejected,
+            false,
+            Some("query_rejected".to_owned()),
+        ),
+        ToolResultClass::Exhausted => (
+            EvidenceStatus::BudgetExhausted,
+            false,
+            Some("budget_exhausted".to_owned()),
+        ),
+        ToolResultClass::Stale => (
+            EvidenceStatus::Empty,
+            false,
+            Some("stale_source".to_owned()),
+        ),
+        ToolResultClass::Unavailable | ToolResultClass::Succeeded => (
+            EvidenceStatus::Unavailable,
+            false,
+            Some("context_unavailable".to_owned()),
+        ),
+    };
+    EvidenceMetadata {
+        status,
+        freshness_ms: None,
+        truncated,
+        error,
     }
 }
 

@@ -5,8 +5,8 @@
 //! cannot mutate the previously committed board.
 
 use ai_sre::reasoning::evidence::{
-    EvidenceBoard, EvidenceError, EvidenceSource, MAX_EVIDENCE_PAYLOAD_BYTES,
-    MAX_EVIDENCE_QUERY_BYTES, MAX_EVIDENCE_RECORDS,
+    EvidenceBoard, EvidenceError, EvidenceMetadata, EvidenceSource, EvidenceStatus,
+    MAX_EVIDENCE_PAYLOAD_BYTES, MAX_EVIDENCE_QUERY_BYTES, MAX_EVIDENCE_RECORDS,
 };
 
 #[test]
@@ -120,4 +120,37 @@ fn redaction_covers_camel_case_keys_embedded_labels_and_preserves_layout() {
     assert!(record.query.contains('\n'));
     assert!(record.query.contains('\t'));
     assert!(String::from_utf8_lossy(&record.payload).contains("line one\\nline two"));
+}
+
+#[test]
+fn failure_envelopes_retain_safe_status_and_truncation_metadata() {
+    // Given a bounded marker for a source that returned only a partial result.
+    let mut board = EvidenceBoard::default();
+    let metadata = EvidenceMetadata {
+        status: EvidenceStatus::Partial,
+        freshness_ms: Some(250),
+        truncated: true,
+        error: Some("output_limit_exceeded".to_owned()),
+    };
+
+    // When the adapter commits the failure envelope.
+    let evidence_id = board
+        .commit_with_metadata(
+            EvidenceSource::GrafanaLogs,
+            "{service=\"api\"}",
+            b"[NO EVIDENCE]".to_vec(),
+            metadata,
+        )
+        .expect("failure envelope should commit");
+
+    // Then the citation resolves to bounded data and explicit safe metadata.
+    let record = &board.records()[0];
+    assert_eq!(evidence_id, "evidence-0001");
+    assert_eq!(record.metadata.status, EvidenceStatus::Partial);
+    assert_eq!(record.metadata.freshness_ms, Some(250));
+    assert!(record.metadata.truncated);
+    assert_eq!(
+        record.metadata.error.as_deref(),
+        Some("output_limit_exceeded")
+    );
 }
