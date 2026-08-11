@@ -1,4 +1,4 @@
-//! GIVEN/WHEN/THEN contracts for the bounded Grafana `gcx` process boundary.
+//! Contract tests for the bounded Grafana `gcx` process boundary.
 
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
 
