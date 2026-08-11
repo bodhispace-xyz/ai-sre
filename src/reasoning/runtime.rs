@@ -3,15 +3,18 @@
 //! Adapters call this service with already-classified results. The service owns
 //! sequencing and durable facts but performs no provider or Grafana I/O.
 
+use std::collections::BTreeSet;
 use thiserror::Error;
 
 use super::{
     budget::Reservation,
+    contracts::DiagnosticReport,
     coordinator::{
         AttemptFacts, CoordinatorError, FailureClass, ReasoningConfig, ReasoningRun, RunStatus,
     },
     evidence::{EvidenceBoard, EvidenceError, EvidenceSource},
     journal::{IncidentJournal, JournalEvent, Phase, attempt_event},
+    recorded::{RecordedOutcome, RecordedProvider},
     router::ProviderKind,
 };
 
@@ -118,6 +121,67 @@ impl IncidentRuntime {
             provider: Some(provider),
         });
         Ok(status)
+    }
+
+    /// Executes a complete scripted fallback run for contract and shadow tests.
+    ///
+    /// Each provider starts from the same immutable evidence-board view; a
+    /// failed or malformed response is discarded before the next provider.
+    pub fn run_recorded(
+        &mut self,
+        providers: &mut [RecordedProvider],
+        reservation: Reservation,
+        start_at_ms: u64,
+    ) -> Result<RunStatus, RuntimeError> {
+        let evidence_ids = self
+            .evidence
+            .records()
+            .iter()
+            .map(|record| record.evidence_id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut at_ms = start_at_ms;
+
+        loop {
+            let Some(provider_kind) = self.admit_provider(reservation, at_ms)? else {
+                return Ok(self.run.status().unwrap_or(RunStatus::Exhausted));
+            };
+            let attempt = providers
+                .iter_mut()
+                .find(|provider| provider.provider() == provider_kind)
+                .and_then(RecordedProvider::take_next);
+
+            match attempt {
+                Some(attempt) => match attempt.outcome {
+                    RecordedOutcome::Success(json) => {
+                        let report = DiagnosticReport::from_provider_json(&json);
+                        let valid = report
+                            .as_ref()
+                            .is_ok_and(|report| report.validate_against(&evidence_ids).is_ok());
+                        if valid {
+                            return self.succeed_provider(provider_kind, attempt.facts, at_ms);
+                        }
+                        self.fail_provider(
+                            provider_kind,
+                            FailureClass::MalformedResponse,
+                            attempt.facts,
+                            at_ms,
+                        )?;
+                    }
+                    RecordedOutcome::Failure(failure) => {
+                        self.fail_provider(provider_kind, failure, attempt.facts, at_ms)?;
+                    }
+                },
+                None => {
+                    self.fail_provider(
+                        provider_kind,
+                        FailureClass::TemporarilyUnavailable,
+                        AttemptFacts::default(),
+                        at_ms,
+                    )?;
+                }
+            }
+            at_ms = at_ms.saturating_add(1);
+        }
     }
 
     /// Returns the immutable evidence board for provider context export.

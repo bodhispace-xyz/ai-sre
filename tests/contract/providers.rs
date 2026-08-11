@@ -491,3 +491,55 @@ fn recorded_provider_replays_fallback_outcomes_without_network_access() {
     assert_eq!(attempt.facts.elapsed_ms, 50);
     assert!(provider.take_next().is_none());
 }
+
+#[test]
+fn runtime_runs_recorded_fallback_from_openai_to_gemini() {
+    // Given one evidence item and a scripted OpenAI failure plus deterministic success.
+    let mut runtime = IncidentRuntime::new(ReasoningConfig::default()).expect("runtime config");
+    runtime
+        .commit_evidence(EvidenceSource::GrafanaMetrics, "up", b"metric".to_vec(), 1)
+        .expect("evidence");
+    let report =
+        r#"{"summary":"The service is healthy.","evidence":[{"evidence_id":"evidence-0001"}]}"#;
+    let mut providers = vec![
+        RecordedProvider::new(
+            ProviderKind::OpenAi,
+            [RecordedAttempt {
+                outcome: RecordedOutcome::Failure(FailureClass::TemporarilyUnavailable),
+                facts: AttemptFacts {
+                    elapsed_ms: 10,
+                    ..AttemptFacts::default()
+                },
+            }],
+        ),
+        RecordedProvider::new(
+            ProviderKind::Gemini,
+            [RecordedAttempt {
+                outcome: RecordedOutcome::Success(report.to_owned()),
+                facts: AttemptFacts {
+                    elapsed_ms: 20,
+                    tokens: Some(40),
+                    ..AttemptFacts::default()
+                },
+            }],
+        ),
+    ];
+
+    // When the runtime executes the complete scripted run.
+    let result = runtime.run_recorded(
+        &mut providers,
+        Reservation {
+            provider_calls: 1,
+            tokens: 100,
+            evidence_queries: 1,
+            cost_micro_usd: 0,
+        },
+        10,
+    );
+
+    // Then the failed OpenAI run is discarded and Gemini is the terminal provider.
+    assert_eq!(result, Ok(RunStatus::Succeeded(ProviderKind::Gemini)));
+    let projection = runtime.journal().project();
+    assert_eq!(projection.provider_attempts, 2);
+    assert_eq!(projection.terminal_provider, Some(ProviderKind::Gemini));
+}
