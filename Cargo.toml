@@ -20,3 +20,6 @@ thiserror = "2.0.20"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
+
+[lints.rust]
+missing_docs = "deny"
