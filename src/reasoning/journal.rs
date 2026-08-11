@@ -84,11 +84,23 @@ pub enum JournalEvent {
     },
 }
 
+/// Stable scope attached to every persisted causal fact.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JournalContext {
+    /// Incident episode identity.
+    pub incident_id: String,
+    /// Reasoning-run identity within the incident episode.
+    pub run_id: String,
+}
+
 /// A journal entry with a monotonic sequence assigned by the journal.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalEntry {
     /// Durable ordering key, independent of wall-clock timestamps.
     pub sequence: u64,
+    /// Optional durable scope for facts written by the application shell.
+    #[serde(default)]
+    pub context: Option<JournalContext>,
     /// Raw incident fact.
     pub event: JournalEvent,
 }
@@ -103,7 +115,11 @@ impl IncidentJournal {
     /// Appends one event and assigns the next sequence.
     pub fn append(&mut self, event: JournalEvent) {
         let sequence = self.entries.len() as u64;
-        self.entries.push(JournalEntry { sequence, event });
+        self.entries.push(JournalEntry {
+            sequence,
+            context: None,
+            event,
+        });
     }
 
     /// Returns entries in sequence order for durable persistence or replay.
@@ -130,6 +146,15 @@ impl IncidentJournal {
 
     /// Rebuilds efficiency metrics from raw facts only.
     pub fn project(&self) -> EfficiencyProjection {
+        self.project_matching(|_| true)
+    }
+
+    /// Rebuilds one incident/run projection from raw scoped facts only.
+    pub fn project_scoped(&self, context: &JournalContext) -> EfficiencyProjection {
+        self.project_matching(|entry| entry.context.as_ref() == Some(context))
+    }
+
+    fn project_matching(&self, include: impl Fn(&JournalEntry) -> bool) -> EfficiencyProjection {
         let mut projection = EfficiencyProjection::default();
         let mut phase_starts = [
             (Phase::Investigation, None),
@@ -138,6 +163,9 @@ impl IncidentJournal {
             (Phase::Execution, None),
         ];
         for entry in &self.entries {
+            if !include(entry) {
+                continue;
+            }
             match &entry.event {
                 JournalEvent::IncidentOpened { .. }
                 | JournalEvent::AlertDeduplicated { .. }

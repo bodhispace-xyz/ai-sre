@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use ai_sre::reasoning::{
     incident::{AlertSignal, AlertStatus, normalize},
-    journal::JournalEvent,
+    journal::{JournalContext, JournalEvent},
     storage::JournalStore,
 };
 
@@ -98,4 +98,148 @@ fn journal_and_notification_intent_commit_atomically() {
     );
     assert!(reopened.pending_outbox().expect("outbox").is_empty());
     let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn scoped_journal_facts_survive_restart_with_incident_and_run_identity() {
+    // Given a fact committed with an explicit incident episode and run scope.
+    let path = std::env::temp_dir().join(format!("ai-sre-scoped-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let context = JournalContext {
+        incident_id: "incident-scoped".to_owned(),
+        run_id: "run-001".to_owned(),
+    };
+    let mut store = JournalStore::open(&path).expect("open journal");
+    store
+        .append_scoped(
+            JournalEvent::PhaseStarted {
+                phase: ai_sre::reasoning::journal::Phase::Investigation,
+                at_ms: 0,
+            },
+            Some(&context),
+        )
+        .expect("append scoped fact");
+    drop(store);
+
+    // When the journal is reopened after the process boundary.
+    let reopened = JournalStore::open(&path).expect("reopen journal");
+
+    // Then the causal fact retains both identities for audit and accounting.
+    assert_eq!(reopened.journal().entries()[0].context, Some(context));
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn cost_reservation_is_atomic_idempotent_and_reconciles_known_usage() {
+    // Given two durable budget windows with one shared reservation.
+    let path = std::env::temp_dir().join(format!("ai-sre-budget-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let mut store = JournalStore::open(&path).expect("open journal");
+
+    // When the same reservation is retried and then reconciled with trusted usage.
+    store
+        .reserve_cost(
+            "run-budget",
+            400,
+            &[("incident:one", 1_000), ("day:2026-08-11", 500)],
+            10,
+        )
+        .expect("reserve budget");
+    store
+        .reserve_cost(
+            "run-budget",
+            400,
+            &[("incident:one", 1_000), ("day:2026-08-11", 500)],
+            11,
+        )
+        .expect("retry is idempotent");
+    assert!(
+        store
+            .reconcile_cost("run-budget", Some(250))
+            .expect("reconcile budget")
+    );
+
+    // Then the reservation is released to the trusted actual amount once.
+    assert!(
+        !store
+            .reconcile_cost("run-budget", Some(250))
+            .expect("duplicate reconciliation")
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn cost_reservation_rejects_overcommitment_without_partial_scope_state() {
+    // Given a daily ceiling smaller than the requested worst-case reservation.
+    let path = std::env::temp_dir().join(format!(
+        "ai-sre-budget-reject-{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut store = JournalStore::open(&path).expect("open journal");
+
+    // When the reservation would fit one scope but exceed the other.
+    let result = store.reserve_cost(
+        "run-rejected",
+        400,
+        &[("incident:one", 1_000), ("day:2026-08-11", 300)],
+        10,
+    );
+
+    // Then the whole reservation fails atomically.
+    assert!(matches!(
+        result,
+        Err(ai_sre::reasoning::storage::JournalStoreError::BudgetExhausted)
+    ));
+    assert!(
+        !store
+            .reconcile_cost("run-rejected", Some(100))
+            .is_ok_and(|reconciled| reconciled)
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn efficiency_projection_rebuilds_per_scoped_run() {
+    // Given two runs with overlapping phase names but different scopes.
+    let path =
+        std::env::temp_dir().join(format!("ai-sre-projection-{}.sqlite", std::process::id()));
+    let _ = std::fs::remove_file(&path);
+    let mut store = JournalStore::open(&path).expect("open journal");
+    let first = JournalContext {
+        incident_id: "incident-projection".to_owned(),
+        run_id: "run-a".to_owned(),
+    };
+    let second = JournalContext {
+        incident_id: "incident-projection".to_owned(),
+        run_id: "run-b".to_owned(),
+    };
+    for (context, end) in [(&first, 10_u64), (&second, 30_u64)] {
+        store
+            .append_scoped(
+                JournalEvent::PhaseStarted {
+                    phase: ai_sre::reasoning::journal::Phase::Investigation,
+                    at_ms: 0,
+                },
+                Some(context),
+            )
+            .expect("append phase start");
+        store
+            .append_scoped(
+                JournalEvent::PhaseFinished {
+                    phase: ai_sre::reasoning::journal::Phase::Investigation,
+                    at_ms: end,
+                },
+                Some(context),
+            )
+            .expect("append phase finish");
+    }
+
+    // When the process rebuilds the projection for one run.
+    let projection = store.efficiency_projection(&first);
+
+    // Then unrelated run timing cannot inflate this run's metrics.
+    assert_eq!(projection.active_machine_ms, 10);
+    assert_eq!(store.efficiency_projection(&second).active_machine_ms, 30);
+    let _ = std::fs::remove_file(&path);
 }

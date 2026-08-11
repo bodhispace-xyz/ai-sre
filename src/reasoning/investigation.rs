@@ -14,7 +14,7 @@ use crate::adapters::grafana::context::{ContextError, GrafanaContext};
 use super::{
     budget::Reservation,
     incident::IncidentSignal,
-    journal::{JournalEvent, Phase},
+    journal::{JournalContext, JournalEvent, Phase},
     live::{LiveProviders, run_live},
     recorded::RecordedProvider,
     router::ProviderKind,
@@ -69,6 +69,8 @@ pub struct LiveInvestigationInput<'a> {
     pub journal: &'a mut JournalStore,
     /// Normalized incident signal.
     pub signal: &'a IncidentSignal,
+    /// Stable run identity for this investigation attempt.
+    pub run_id: &'a str,
     /// Fresh per-incident reasoning runtime.
     pub runtime: &'a mut IncidentRuntime,
     /// Configured live providers.
@@ -89,16 +91,24 @@ pub async fn investigate_live(
         grafana,
         journal,
         signal,
+        run_id,
         runtime,
         providers,
         reservation,
         queries,
         start_at_ms,
     } = input;
-    journal.append(JournalEvent::PhaseStarted {
-        phase: Phase::Investigation,
-        at_ms: start_at_ms,
-    })?;
+    let context = JournalContext {
+        incident_id: signal.incident_id.clone(),
+        run_id: run_id.to_owned(),
+    };
+    journal.append_scoped(
+        JournalEvent::PhaseStarted {
+            phase: Phase::Investigation,
+            at_ms: start_at_ms,
+        },
+        Some(&context),
+    )?;
     let mut collected = super::evidence::EvidenceBoard::default();
     let remaining = runtime.remaining().ok_or(InvestigationError::Deadline)?;
     timeout(remaining, grafana.logs(&mut collected, queries.logs))
@@ -116,14 +126,17 @@ pub async fn investigate_live(
             runtime.elapsed_ms(),
         )?;
     }
-    journal.append(JournalEvent::PhaseFinished {
-        phase: Phase::Investigation,
-        at_ms: runtime.elapsed_ms(),
-    })?;
+    journal.append_scoped(
+        JournalEvent::PhaseFinished {
+            phase: Phase::Investigation,
+            at_ms: runtime.elapsed_ms(),
+        },
+        Some(&context),
+    )?;
     let prompt = build_prompt(signal, runtime);
     let status = run_live(runtime, providers, &prompt, reservation, start_at_ms).await?;
     for entry in runtime.journal().entries() {
-        journal.append(entry.event.clone())?;
+        journal.append_scoped(entry.event.clone(), Some(&context))?;
     }
     Ok(InvestigationResult {
         incident_id: signal.incident_id.clone(),
