@@ -1,10 +1,11 @@
 //! Contracts for server-owned Git, deployment-history, and health context.
 
-use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, fs, os::unix::fs::PermissionsExt, path::PathBuf, time::Duration};
 
 use ai_sre::{
     adapters::context::{
-        ContextError, ReadOnlyRunner, deployment_history, git_desired_state, health_plan,
+        ContextError, ReadOnlyContext, ReadOnlyContextConfig, ReadOnlyRunner, deployment_history,
+        git_desired_state, health_plan,
     },
     reasoning::evidence::{EvidenceBoard, EvidenceSource},
 };
@@ -78,4 +79,32 @@ async fn successful_read_only_output_is_committed_to_the_correct_source() {
     assert_eq!(evidence_id, "evidence-0001");
     assert_eq!(board.records()[0].source, EvidenceSource::Health);
     assert_eq!(board.records()[0].payload, br#"{"status":"up"}"#);
+}
+
+#[tokio::test]
+async fn context_facade_keeps_health_aliases_and_git_repository_server_owned() {
+    // Given a facade configured with one canonical repository and health alias.
+    let binary = fixture_script("printf '{\"status\":\"up\"}'");
+    let mut health_commands = BTreeMap::new();
+    health_commands.insert("api".to_owned(), Vec::new());
+    let context = ReadOnlyContext::new(
+        ReadOnlyRunner::new(Duration::from_secs(1), 128, 1),
+        ReadOnlyContextConfig {
+            git_binary: binary.clone(),
+            git_repository: "/srv/repo".to_owned(),
+            health_binary: binary,
+            health_commands,
+        },
+    )
+    .expect("valid context config");
+    let mut board = EvidenceBoard::default();
+
+    // When the configured health alias is requested and an unknown alias is attempted.
+    let known = context.health(&mut board, "api").await;
+    let unknown = context.health(&mut board, "admin").await;
+
+    // Then only the server-owned alias can reach the process boundary.
+    assert!(known.is_ok());
+    assert_eq!(unknown, Err(ContextError::InvalidPlan));
+    assert_eq!(board.records()[0].source, EvidenceSource::Health);
 }

@@ -4,7 +4,7 @@
 //! are deployment-owned, and every process runs without a shell, inherited
 //! environment, or caller working directory.
 
-use std::{path::PathBuf, sync::Arc, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
 
 use thiserror::Error;
 use tokio::{io::AsyncReadExt, process::Command, sync::Semaphore, time};
@@ -66,6 +66,26 @@ pub struct ReadOnlyRunner {
     timeout: Duration,
     max_output_bytes: usize,
     concurrency: Arc<Semaphore>,
+}
+
+/// Deployment-owned selectors for the read-only context facade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReadOnlyContextConfig {
+    /// Absolute path to the server-owned Git executable.
+    pub git_binary: PathBuf,
+    /// Absolute path to the server-owned Git repository.
+    pub git_repository: String,
+    /// Absolute path to the server-owned health adapter executable.
+    pub health_binary: PathBuf,
+    /// Health aliases mapped to fixed argument vectors.
+    pub health_commands: BTreeMap<String, Vec<String>>,
+}
+
+/// Read-only context facade used by orchestration code.
+#[derive(Debug, Clone)]
+pub struct ReadOnlyContext {
+    runner: ReadOnlyRunner,
+    config: ReadOnlyContextConfig,
 }
 
 /// Safe failures at the read-only process boundary.
@@ -149,6 +169,74 @@ impl ReadOnlyRunner {
         })
         .await
         .map_err(|_| ContextError::TimedOut)?
+    }
+}
+
+impl ReadOnlyContext {
+    /// Creates a facade from deployment-owned binaries, repository, and health aliases.
+    pub fn new(
+        runner: ReadOnlyRunner,
+        config: ReadOnlyContextConfig,
+    ) -> Result<Self, ContextError> {
+        if !config.git_repository.starts_with('/')
+            || config.git_repository.contains('\0')
+            || config.git_repository.chars().any(char::is_whitespace)
+            || config
+                .health_commands
+                .keys()
+                .any(|alias| alias.trim().is_empty())
+        {
+            return Err(ContextError::InvalidPlan);
+        }
+        Ok(Self { runner, config })
+    }
+
+    /// Reads one bounded desired-state path at a server-selected revision.
+    pub async fn desired_state(
+        &self,
+        board: &mut EvidenceBoard,
+        revision: impl Into<String>,
+        path: impl Into<String>,
+    ) -> Result<String, ContextError> {
+        let plan = git_desired_state(
+            &self.config.git_binary,
+            self.config.git_repository.clone(),
+            revision,
+            path,
+        )?;
+        self.runner.execute(board, &plan).await
+    }
+
+    /// Reads bounded recent history for one server-selected desired-state path.
+    pub async fn deployment_history(
+        &self,
+        board: &mut EvidenceBoard,
+        path: impl Into<String>,
+        max_entries: usize,
+    ) -> Result<String, ContextError> {
+        let plan = deployment_history(
+            &self.config.git_binary,
+            self.config.git_repository.clone(),
+            path,
+            max_entries,
+        )?;
+        self.runner.execute(board, &plan).await
+    }
+
+    /// Reads one configured health alias; unknown aliases fail closed.
+    pub async fn health(
+        &self,
+        board: &mut EvidenceBoard,
+        alias: &str,
+    ) -> Result<String, ContextError> {
+        let args = self
+            .config
+            .health_commands
+            .get(alias)
+            .cloned()
+            .ok_or(ContextError::InvalidPlan)?;
+        let plan = health_plan(&self.config.health_binary, args, alias)?;
+        self.runner.execute(board, &plan).await
     }
 }
 
