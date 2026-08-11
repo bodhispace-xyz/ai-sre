@@ -85,6 +85,7 @@ pub async fn execute_model_tool(
     })?;
     runtime.reserve_evidence_query()?;
     let result = grafana.execute_tool(board, context_budget, call).await;
+    loop_state.record_result(result.clone());
     if result.class == ToolResultClass::Succeeded {
         if let Some(evidence_id) = &result.evidence_id {
             if let Some(record) = board

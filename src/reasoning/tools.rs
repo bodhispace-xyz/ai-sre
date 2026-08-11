@@ -103,6 +103,7 @@ pub struct ToolTurnPolicy {
 pub struct ToolLoop {
     policy: ToolTurnPolicy,
     turns_used: u32,
+    results: Vec<ToolResult>,
 }
 
 /// Errors that stop a tool request before any adapter I/O occurs.
@@ -131,6 +132,7 @@ impl ToolLoop {
         Self {
             policy,
             turns_used: 0,
+            results: Vec::new(),
         }
     }
 
@@ -152,6 +154,16 @@ impl ToolLoop {
     /// Returns the remaining tool-turn allowance.
     pub const fn remaining(&self) -> u32 {
         self.policy.max_turns - self.turns_used
+    }
+
+    /// Records a bounded result that can be serialized into the next provider turn.
+    pub fn record_result(&mut self, result: ToolResult) {
+        self.results.push(result);
+    }
+
+    /// Returns the immutable tool-result transcript for provider resumption.
+    pub fn results(&self) -> &[ToolResult] {
+        &self.results
     }
 }
 
@@ -176,8 +188,8 @@ pub enum ToolPolicyError {
 #[cfg(test)]
 mod tests {
     use super::{
-        ContextTool, ToolCall, ToolLoop, ToolLoopError, ToolPolicyError, ToolTurnPolicy,
-        parse_tool_call,
+        ContextTool, ToolCall, ToolLoop, ToolLoopError, ToolPolicyError, ToolResult,
+        ToolResultClass, ToolTurnPolicy, parse_tool_call,
     };
 
     #[test]
@@ -239,5 +251,31 @@ mod tests {
         // Then unsupported capabilities and policy-owned fields fail closed.
         assert_eq!(unknown, Err(ToolLoopError::UnknownTool));
         assert_eq!(extra, Err(ToolLoopError::InvalidArguments));
+    }
+
+    #[test]
+    fn tool_loop_retains_results_for_same_run_resumption() {
+        // Given an admitted tool turn and a bounded result envelope.
+        let policy = ToolTurnPolicy::new(2).expect("positive limit");
+        let mut loop_state = ToolLoop::new(policy);
+        let call = ToolCall {
+            call_id: "call-1".to_owned(),
+            tool: ContextTool::QueryMetrics,
+            query: "up".to_owned(),
+        };
+        loop_state.admit(&call).expect("first turn");
+
+        // When the context result is recorded before the next provider turn.
+        loop_state.record_result(ToolResult {
+            call_id: "call-1".to_owned(),
+            class: ToolResultClass::Succeeded,
+            evidence_id: Some("ev-1".to_owned()),
+            detail: "bounded evidence committed".to_owned(),
+        });
+
+        // Then the same run can resume with the correlated result.
+        assert_eq!(loop_state.results().len(), 1);
+        assert_eq!(loop_state.results()[0].evidence_id.as_deref(), Some("ev-1"));
+        assert_eq!(loop_state.remaining(), 1);
     }
 }
