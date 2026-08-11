@@ -64,6 +64,57 @@ pub struct ToolTurnPolicy {
     pub max_turns: u32,
 }
 
+/// Mutable state for one provider's finite context conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolLoop {
+    policy: ToolTurnPolicy,
+    turns_used: u32,
+}
+
+/// Errors that stop a tool request before any adapter I/O occurs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+pub enum ToolLoopError {
+    /// The provider supplied an empty correlation identifier.
+    #[error("tool call identifier is empty")]
+    EmptyCallId,
+    /// The provider supplied an empty query expression.
+    #[error("tool query is empty")]
+    EmptyQuery,
+    /// The provider exceeded the finite tool-turn allowance.
+    #[error("tool turn budget exhausted")]
+    TurnLimit,
+}
+
+impl ToolLoop {
+    /// Starts a fresh finite loop for one provider run.
+    pub const fn new(policy: ToolTurnPolicy) -> Self {
+        Self {
+            policy,
+            turns_used: 0,
+        }
+    }
+
+    /// Validates and admits one tool request before context execution.
+    pub fn admit(&mut self, call: &ToolCall) -> Result<(), ToolLoopError> {
+        if call.call_id.trim().is_empty() {
+            return Err(ToolLoopError::EmptyCallId);
+        }
+        if call.query.trim().is_empty() {
+            return Err(ToolLoopError::EmptyQuery);
+        }
+        if self.turns_used >= self.policy.max_turns {
+            return Err(ToolLoopError::TurnLimit);
+        }
+        self.turns_used += 1;
+        Ok(())
+    }
+
+    /// Returns the remaining tool-turn allowance.
+    pub const fn remaining(&self) -> u32 {
+        self.policy.max_turns - self.turns_used
+    }
+}
+
 impl ToolTurnPolicy {
     /// Creates a policy, rejecting an unbounded zero-turn configuration.
     pub const fn new(max_turns: u32) -> Result<Self, ToolPolicyError> {
@@ -84,7 +135,7 @@ pub enum ToolPolicyError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContextTool, ToolPolicyError, ToolTurnPolicy};
+    use super::{ContextTool, ToolCall, ToolLoop, ToolLoopError, ToolPolicyError, ToolTurnPolicy};
 
     #[test]
     fn tool_policy_rejects_unbounded_zero_turn_configuration() {
@@ -108,5 +159,26 @@ mod tests {
 
         // Then no shell, mutation, credential, or filesystem capability exists.
         assert!(all_read_only);
+    }
+
+    #[test]
+    fn tool_loop_stops_before_the_backend_after_its_turn_limit() {
+        // Given a provider run with one permitted context turn.
+        let policy = ToolTurnPolicy::new(1).expect("positive limit");
+        let mut loop_state = ToolLoop::new(policy);
+        let call = ToolCall {
+            call_id: "call-1".to_owned(),
+            tool: ContextTool::QueryLogs,
+            query: "{app=\"api\"}".to_owned(),
+        };
+
+        // When the provider repeats a second request in the same run.
+        let first = loop_state.admit(&call);
+        let second = loop_state.admit(&call);
+
+        // Then the second request is denied before any GCX process can start.
+        assert_eq!(first, Ok(()));
+        assert_eq!(second, Err(ToolLoopError::TurnLimit));
+        assert_eq!(loop_state.remaining(), 0);
     }
 }
