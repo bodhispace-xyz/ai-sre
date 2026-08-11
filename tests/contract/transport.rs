@@ -49,11 +49,11 @@ async fn authenticated_fragmented_request_waits_for_durable_ack() {
     // When the valid request arrives in multiple TCP fragments.
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     stream
-        .write_all(request[..split].as_bytes())
+        .write_all(&request.as_bytes()[..split])
         .await
         .expect("first fragment");
     stream
-        .write_all(request[split..].as_bytes())
+        .write_all(&request.as_bytes()[split..])
         .await
         .expect("second fragment");
     let command = receiver.recv().await.expect("queued command");
