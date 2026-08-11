@@ -11,6 +11,7 @@ use ai_sre::reasoning::coordinator::{
     AttemptFacts, AttemptOutcome, AttemptRecord, CoordinatorError, FailureClass, ReasoningConfig,
     ReasoningRun, RunStatus,
 };
+use ai_sre::reasoning::evidence::{EvidenceBoard, EvidenceError, EvidenceSource};
 use ai_sre::reasoning::journal::{IncidentJournal, JournalEvent, Phase, attempt_event};
 use ai_sre::reasoning::router::{ProviderKind, ProviderOrder, next_provider, next_provider_in};
 
@@ -387,4 +388,24 @@ fn journal_replay_derives_efficiency_without_turning_unknown_cost_into_zero() {
     assert_eq!(projection.terminal_provider, Some(ProviderKind::Gemini));
     assert_eq!(journal.entries()[0].sequence, 0);
     assert_eq!(journal.entries()[4].sequence, 4);
+}
+
+#[test]
+fn evidence_board_assigns_stable_ids_and_rejects_empty_tool_output() {
+    // Given an empty run-scoped evidence board.
+    let mut board = EvidenceBoard::default();
+
+    // When the first tool result is committed and an empty result is rejected.
+    let first = board.commit(
+        EvidenceSource::GrafanaMetrics,
+        "up",
+        br#"{"data":[]}"#.to_vec(),
+    );
+    let empty = board.commit(EvidenceSource::GrafanaLogs, "{app=\"api\"}", Vec::new());
+
+    // Then the ID is deterministic and the board remains unchanged by rejection.
+    assert_eq!(first, Ok("evidence-0001".to_owned()));
+    assert_eq!(empty, Err(EvidenceError::EmptyPayload));
+    assert_eq!(board.records().len(), 1);
+    assert_eq!(board.records()[0].evidence_id, "evidence-0001");
 }
