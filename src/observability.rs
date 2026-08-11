@@ -101,6 +101,30 @@ pub fn render_journal_metrics(journal: &IncidentJournal) -> String {
     );
     metric(
         &mut output,
+        "ai_sre_tool_calls_total",
+        "Aggregate model-directed read-only context calls.",
+        u64::from(projection.tool_calls),
+    );
+    metric(
+        &mut output,
+        "ai_sre_successful_tool_calls_total",
+        "Aggregate context calls that committed evidence.",
+        u64::from(projection.successful_tool_calls),
+    );
+    metric(
+        &mut output,
+        "ai_sre_tool_time_ms_total",
+        "Aggregate bounded context-call time in milliseconds.",
+        projection.tool_elapsed_ms,
+    );
+    metric(
+        &mut output,
+        "ai_sre_tool_output_bytes_total",
+        "Aggregate bounded context-result bytes retained for resumption.",
+        projection.tool_output_bytes,
+    );
+    metric(
+        &mut output,
         "ai_sre_tokens_total",
         "Aggregate trusted provider token usage.",
         projection.tokens,
@@ -154,6 +178,7 @@ mod tests {
             .expect("append incident");
         let metrics = render_journal_metrics(store.journal());
         assert!(metrics.contains("ai_sre_incidents_opened_total 1"));
+        assert!(metrics.contains("ai_sre_tool_calls_total 0"));
         assert!(!metrics.contains("secret-incident-id"));
         assert!(!metrics.contains("incident_id="));
         let _ = std::fs::remove_file(&path);
