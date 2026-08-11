@@ -27,6 +27,40 @@ pub struct ToolCall {
     pub query: String,
 }
 
+/// Parses the small provider-neutral tool-call shape after adapter decoding.
+pub fn parse_tool_call(
+    call_id: impl Into<String>,
+    name: &str,
+    arguments: &str,
+) -> Result<ToolCall, ToolLoopError> {
+    let tool = match name {
+        "query_logs" => ContextTool::QueryLogs,
+        "query_metrics" => ContextTool::QueryMetrics,
+        _ => return Err(ToolLoopError::UnknownTool),
+    };
+    let query = serde_json::from_str::<ToolArguments>(arguments)
+        .map_err(|_| ToolLoopError::InvalidArguments)?
+        .query;
+    let call = ToolCall {
+        call_id: call_id.into(),
+        tool,
+        query,
+    };
+    if call.call_id.trim().is_empty() {
+        return Err(ToolLoopError::EmptyCallId);
+    }
+    if call.query.trim().is_empty() {
+        return Err(ToolLoopError::EmptyQuery);
+    }
+    Ok(call)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ToolArguments {
+    query: String,
+}
+
 /// Classification retained when a tool request cannot produce normal evidence.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -80,6 +114,12 @@ pub enum ToolLoopError {
     /// The provider supplied an empty query expression.
     #[error("tool query is empty")]
     EmptyQuery,
+    /// The provider requested a capability outside the allowlist.
+    #[error("tool is not allowlisted")]
+    UnknownTool,
+    /// Tool arguments did not match the strict JSON shape.
+    #[error("tool arguments are invalid")]
+    InvalidArguments,
     /// The provider exceeded the finite tool-turn allowance.
     #[error("tool turn budget exhausted")]
     TurnLimit,
@@ -135,7 +175,10 @@ pub enum ToolPolicyError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ContextTool, ToolCall, ToolLoop, ToolLoopError, ToolPolicyError, ToolTurnPolicy};
+    use super::{
+        ContextTool, ToolCall, ToolLoop, ToolLoopError, ToolPolicyError, ToolTurnPolicy,
+        parse_tool_call,
+    };
 
     #[test]
     fn tool_policy_rejects_unbounded_zero_turn_configuration() {
@@ -180,5 +223,21 @@ mod tests {
         assert_eq!(first, Ok(()));
         assert_eq!(second, Err(ToolLoopError::TurnLimit));
         assert_eq!(loop_state.remaining(), 0);
+    }
+
+    #[test]
+    fn parser_rejects_unknown_capabilities_and_extra_arguments() {
+        // Given provider-authored names and JSON arguments.
+        let unknown = parse_tool_call("call-1", "shell", r#"{"query":"pwd"}"#);
+        let extra = parse_tool_call(
+            "call-2",
+            "query_logs",
+            r#"{"query":"{app=\"api\"}","datasource":"loki"}"#,
+        );
+
+        // When the adapter converts them into the core tool contract.
+        // Then unsupported capabilities and policy-owned fields fail closed.
+        assert_eq!(unknown, Err(ToolLoopError::UnknownTool));
+        assert_eq!(extra, Err(ToolLoopError::InvalidArguments));
     }
 }
