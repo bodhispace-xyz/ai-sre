@@ -2,7 +2,9 @@
 
 use std::{fs, os::unix::fs::PermissionsExt};
 
-use ai_sre::adapters::llm::openai::{AuthCache, CacheError, RefreshFailure, RefreshSession};
+use ai_sre::adapters::llm::openai::{
+    AuthCache, CacheError, RefreshFailure, RefreshSession, classify_rig_status,
+};
 
 #[test]
 fn refresh_session_rotates_without_exposing_tokens_in_debug_output() {
@@ -84,4 +86,29 @@ fn malformed_cache_fails_closed_without_returning_secret_content() {
     // Then only the safe invalid-cache classification is returned.
     assert_eq!(result, Err(CacheError::Invalid));
     fs::remove_dir_all(directory).expect("remove cache fixture");
+}
+
+#[test]
+fn rig_http_statuses_map_to_safe_openai_failure_classes() {
+    // Given representative Rig HTTP outcomes from the provider boundary.
+    let statuses = [Some(401), Some(429), Some(503), None];
+
+    // When statuses are classified without retaining response bodies.
+    let failures = statuses
+        .iter()
+        .map(|status| classify_rig_status(*status))
+        .collect::<Vec<_>>();
+
+    // Then authentication and transient failures stay distinct and secret-free.
+    assert_eq!(
+        failures[0],
+        ai_sre::reasoning::coordinator::FailureClass::AuthenticationRequired
+    );
+    assert_eq!(
+        failures[1],
+        ai_sre::reasoning::coordinator::FailureClass::RateLimited
+    );
+    assert!(failures[2..].iter().all(|failure| {
+        *failure == ai_sre::reasoning::coordinator::FailureClass::TemporarilyUnavailable
+    }));
 }

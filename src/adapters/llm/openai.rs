@@ -305,10 +305,16 @@ pub async fn refresh_and_complete(
 }
 
 fn classify_rig_failure(error: rig_core::completion::CompletionError) -> FailureClass {
-    match error
-        .provider_response_status()
-        .map(|status| status.as_u16())
-    {
+    classify_rig_status(
+        error
+            .provider_response_status()
+            .map(|status| status.as_u16()),
+    )
+}
+
+/// Classifies a Rig HTTP status without retaining vendor response text.
+pub fn classify_rig_status(status: Option<u16>) -> FailureClass {
+    match status {
         Some(401 | 403) => FailureClass::AuthenticationRequired,
         Some(429) => FailureClass::RateLimited,
         _ => FailureClass::TemporarilyUnavailable,
