@@ -20,6 +20,12 @@ pub enum EvidenceSource {
     GrafanaLogs,
     /// Grafana Prometheus query through the bounded `gcx` adapter.
     GrafanaMetrics,
+    /// Read-only desired-state snapshot from the configured Git repository.
+    GitDesiredState,
+    /// Read-only deployment history from the configured Git repository.
+    DeploymentHistory,
+    /// Read-only health snapshot from a server-owned health adapter.
+    Health,
 }
 
 /// Outcome metadata retained alongside every immutable evidence envelope.
