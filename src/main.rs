@@ -20,7 +20,7 @@ use ai_sre::{
         investigation::{LiveInvestigationInput, ShadowInvestigator, investigate_live},
         live::LiveProviders,
         runtime::IncidentRuntime,
-        storage::JournalStore,
+        storage::{JournalStore, OutboxMessage},
     },
     transport::{AlertIntake, IntakeCommand, IntakeConfig},
 };
@@ -44,6 +44,8 @@ enum MainError {
     Journal(#[from] ai_sre::reasoning::storage::JournalStoreError),
     #[error("AI_SRE_ALERTMANAGER_TOKEN must be configured")]
     MissingIntakeCredential,
+    #[error("NTFY_ENDPOINT and NTFY_TOPIC must be configured")]
+    MissingNotificationConfig,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -65,16 +67,23 @@ async fn main() -> Result<(), MainError> {
         .unwrap_or_else(|| PathBuf::from("state/ai-sre.sqlite"));
     let (sender, mut receiver) = mpsc::channel::<IntakeCommand>(64);
     let mut dispatcher = IncidentDispatcher::new(JournalStore::open(journal_path)?);
-    let gemini = env::var("GEMINI_API_KEY").ok().map(GeminiClient::new);
-    let deepseek = env::var("DEEPSEEK_API_KEY").ok().map(DeepSeekClient::new);
+    let gemini = gated_api_provider("GEMINI_API_KEY", "GEMINI_GATE", "GEMINI_PRICE_CATALOG")
+        .map(GeminiClient::new);
+    let deepseek = gated_api_provider(
+        "DEEPSEEK_API_KEY",
+        "DEEPSEEK_GATE",
+        "DEEPSEEK_PRICE_CATALOG",
+    )
+    .map(DeepSeekClient::new);
     let ntfy = match (env::var("NTFY_ENDPOINT").ok(), env::var("NTFY_TOPIC").ok()) {
         (Some(endpoint), Some(topic)) => Some(NtfyPublisher::new(
             NtfyConfig { endpoint, topic },
             env::var("NTFY_TOKEN").ok(),
         )),
-        _ => None,
+        _ => return Err(MainError::MissingNotificationConfig),
     };
     tokio::spawn(async move {
+        drain_outbox(&mut dispatcher, ntfy.as_ref()).await;
         while let Some(command) = receiver.recv().await {
             let incidents = match dispatcher.process_new(command.batch) {
                 Ok(incidents) => {
@@ -106,13 +115,15 @@ async fn main() -> Result<(), MainError> {
                         continue;
                     }
                 };
+                let start_at_ms = runtime.elapsed_ms();
                 let result = investigate_live(LiveInvestigationInput {
                     grafana: &application.grafana,
                     journal: dispatcher.journal_mut(),
                     signal: &incident,
                     runtime: &mut runtime,
                     providers: LiveProviders {
-                        openai: Some((&application.openai_oauth, &application.openai_cache)),
+                        openai: (env::var("RIG_GATE").ok().as_deref() == Some("accepted"))
+                            .then_some((&application.openai_oauth, &application.openai_cache)),
                         gemini: gemini.as_ref(),
                         deepseek: deepseek.as_ref(),
                     },
@@ -120,22 +131,24 @@ async fn main() -> Result<(), MainError> {
                         provider_calls: 1,
                         tokens: 4_000,
                         evidence_queries: 2,
-                        cost_micro_usd: 0,
+                        cost_micro_usd: 250_000,
                     },
                     queries,
-                    start_at_ms: 0,
+                    start_at_ms,
                 })
                 .await;
                 if result.is_ok() {
-                    if let Err(error) = dispatcher.mark_completed(&incident.incident_id) {
+                    let outbox = result.as_ref().ok().map(|result| OutboxMessage {
+                        delivery_id: format!("{}:report", result.incident_id),
+                        body: ai_sre::adapters::ntfy::render_message(result),
+                    });
+                    if let Err(error) =
+                        dispatcher.mark_completed_with_outbox(&incident.incident_id, outbox)
+                    {
                         eprintln!("incident completion journal failed: {error}");
                     }
                 }
-                if let (Some(ntfy), Ok(result)) = (ntfy.as_ref(), result) {
-                    if let Err(error) = ntfy.publish(&result).await {
-                        eprintln!("ntfy publication failed: {error}");
-                    }
-                }
+                drain_outbox(&mut dispatcher, ntfy.as_ref()).await;
             }
         }
     });
@@ -147,4 +160,36 @@ async fn main() -> Result<(), MainError> {
         .serve(listener, sender)
         .await?;
     Ok(())
+}
+
+async fn drain_outbox(dispatcher: &mut IncidentDispatcher, ntfy: Option<&NtfyPublisher>) {
+    let Some(ntfy) = ntfy else { return };
+    let pending = match dispatcher.journal().pending_outbox() {
+        Ok(pending) => pending,
+        Err(error) => {
+            eprintln!("notification outbox read failed: {error}");
+            return;
+        }
+    };
+    for message in pending {
+        match ntfy.publish_message(&message.body).await {
+            Ok(()) => {
+                if let Err(error) = dispatcher
+                    .journal_mut()
+                    .mark_outbox_delivered(&message.delivery_id, 0)
+                {
+                    eprintln!("notification outbox acknowledgement failed: {error}");
+                }
+            }
+            Err(error) => eprintln!("ntfy publication failed: {error}"),
+        }
+    }
+}
+
+fn gated_api_provider(key: &str, gate: &str, price_catalog: &str) -> Option<String> {
+    let api_key = env::var(key).ok()?;
+    (env::var(gate).ok().as_deref() == Some("accepted"))
+        .then(|| env::var(price_catalog).ok())
+        .flatten()?;
+    Some(api_key)
 }

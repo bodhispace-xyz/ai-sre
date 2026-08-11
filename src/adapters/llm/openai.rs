@@ -62,7 +62,7 @@ pub enum RefreshFailure {
 }
 
 /// A short-lived access token and its rotated refresh token.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RefreshedTokens {
     /// Access token passed to the provider client, never journaled.
     pub access_token: String,
@@ -70,6 +70,17 @@ pub struct RefreshedTokens {
     pub refresh_token: String,
     /// Optional UNIX expiry supplied by the provider.
     pub expires_at: Option<i64>,
+}
+
+impl fmt::Debug for RefreshedTokens {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RefreshedTokens")
+            .field("access_token", &"[redacted]")
+            .field("refresh_token", &"[redacted]")
+            .field("expires_at", &self.expires_at)
+            .finish()
+    }
 }
 
 /// Errors raised while reading or atomically replacing the OAuth cache.

@@ -13,7 +13,7 @@ use crate::transport::IntakeBatch;
 use super::{
     incident::{AlertStatus, IncidentSignal},
     journal::JournalEvent,
-    storage::{JournalStore, JournalStoreError},
+    storage::{JournalStore, JournalStoreError, OutboxMessage},
 };
 
 /// Result of processing one normalized incident signal.
@@ -216,9 +216,21 @@ impl IncidentDispatcher {
 
     /// Durably marks a firing episode complete after report admission.
     pub fn mark_completed(&mut self, incident_id: &str) -> Result<(), DispatchError> {
-        self.journal.append(JournalEvent::IncidentCompleted {
-            incident_id: incident_id.to_owned(),
-        })?;
+        self.mark_completed_with_outbox(incident_id, None)
+    }
+
+    /// Commits completion and an optional notification intent atomically.
+    pub fn mark_completed_with_outbox(
+        &mut self,
+        incident_id: &str,
+        outbox: Option<OutboxMessage>,
+    ) -> Result<(), DispatchError> {
+        self.journal.append_with_outbox(
+            &[JournalEvent::IncidentCompleted {
+                incident_id: incident_id.to_owned(),
+            }],
+            outbox.as_ref(),
+        )?;
         let key = correlation_key(incident_id);
         if let Some(LifecycleState::Firing { episode, .. }) = self.lifecycle.get(&key) {
             self.lifecycle.insert(

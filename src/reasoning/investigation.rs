@@ -5,6 +5,7 @@
 //! lifecycle facts but never invokes the gateway or performs mutations.
 
 use std::collections::BTreeSet;
+use tokio::time::timeout;
 
 use thiserror::Error;
 
@@ -55,6 +56,9 @@ pub enum InvestigationError {
     /// The durable journal could not record a lifecycle fact.
     #[error("shadow investigation journal write failed")]
     Journal(#[from] JournalStoreError),
+    /// The incident wall-clock budget expired before completion.
+    #[error("shadow investigation wall-clock budget expired")]
+    Deadline,
 }
 
 /// Inputs for one live-provider investigation.
@@ -96,8 +100,14 @@ pub async fn investigate_live(
         at_ms: start_at_ms,
     })?;
     let mut collected = super::evidence::EvidenceBoard::default();
-    grafana.logs(&mut collected, queries.logs).await?;
-    grafana.metrics(&mut collected, queries.metrics).await?;
+    let remaining = runtime.remaining().ok_or(InvestigationError::Deadline)?;
+    timeout(remaining, grafana.logs(&mut collected, queries.logs))
+        .await
+        .map_err(|_| InvestigationError::Deadline)??;
+    let remaining = runtime.remaining().ok_or(InvestigationError::Deadline)?;
+    timeout(remaining, grafana.metrics(&mut collected, queries.metrics))
+        .await
+        .map_err(|_| InvestigationError::Deadline)??;
     for record in collected.records() {
         runtime.commit_evidence(
             record.source,
@@ -140,17 +150,79 @@ fn build_prompt(signal: &IncidentSignal, runtime: &IncidentRuntime) -> String {
         signal.incident_id, signal.alert_name
     );
     for record in runtime.evidence().records() {
-        let payload = String::from_utf8_lossy(&record.payload);
+        let payload = redact_text(&String::from_utf8_lossy(&record.payload));
         prompt.push_str(&format!(
             "Evidence {} ({:?}, query={}): {}\n",
             record.evidence_id, record.source, record.query, payload
         ));
         if prompt.len() >= 32_768 {
-            prompt.truncate(32_768);
+            let mut limit = 32_768;
+            while !prompt.is_char_boundary(limit) {
+                limit -= 1;
+            }
+            prompt.truncate(limit);
             break;
         }
     }
     prompt
+}
+
+/// Redacts common credential-bearing fields before evidence crosses an LLM or
+/// operator-notification boundary.
+pub fn redact_text(input: &str) -> String {
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(input) {
+        redact_json(&mut value);
+        return serde_json::to_string(&value).unwrap_or_else(|_| "[REDACTED EVIDENCE]".to_owned());
+    }
+    let mut redact_next = false;
+    input
+        .split_whitespace()
+        .map(|word| {
+            if redact_next {
+                redact_next = false;
+                return "[REDACTED]";
+            }
+            let lower = word.to_ascii_lowercase();
+            if lower == "bearer" {
+                redact_next = true;
+                return word;
+            }
+            if ["token=", "password=", "secret=", "api_key=", "apikey="]
+                .iter()
+                .any(|prefix| lower.starts_with(prefix))
+            {
+                word.split_once('=')
+                    .map_or("Bearer [REDACTED]", |(prefix, _)| {
+                        let _ = prefix;
+                        "[REDACTED]"
+                    })
+            } else {
+                word
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn redact_json(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Object(object) => {
+            for (key, child) in object.iter_mut() {
+                let sensitive = key.to_ascii_lowercase().contains("token")
+                    || key.to_ascii_lowercase().contains("secret")
+                    || key.to_ascii_lowercase().contains("password")
+                    || key.to_ascii_lowercase().contains("api_key")
+                    || key.eq_ignore_ascii_case("authorization");
+                if sensitive {
+                    *child = serde_json::Value::String("[REDACTED]".to_owned());
+                } else {
+                    redact_json(child);
+                }
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(redact_json),
+        _ => {}
+    }
 }
 
 /// Runs one investigation and persists its redacted lifecycle facts.

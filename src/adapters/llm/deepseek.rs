@@ -6,7 +6,7 @@ use std::time::Instant;
 use crate::reasoning::contracts::{ContractError, DiagnosticReport};
 use crate::reasoning::coordinator::{AttemptFacts, FailureClass};
 
-use super::{ApiKey, MAX_RESPONSE_BYTES, ProviderFailure, REQUEST_TIMEOUT, classify_status};
+use super::{ApiKey, ProviderFailure, REQUEST_TIMEOUT, bounded_response_body, classify_status};
 
 const DEFAULT_ENDPOINT: &str = "https://api.deepseek.com/chat/completions";
 
@@ -60,13 +60,7 @@ impl DeepSeekClient {
             return Err(classify_status(response.status()));
         }
 
-        let body = response
-            .bytes()
-            .await
-            .map_err(|_| ProviderFailure::TemporarilyUnavailable)?;
-        if body.len() > MAX_RESPONSE_BYTES {
-            return Err(ProviderFailure::MalformedResponse);
-        }
+        let body = bounded_response_body(response).await?;
         let body = std::str::from_utf8(&body).map_err(|_| ProviderFailure::MalformedResponse)?;
         self.normalize_report(body)
     }

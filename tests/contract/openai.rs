@@ -3,7 +3,7 @@
 use std::{fs, os::unix::fs::PermissionsExt};
 
 use ai_sre::adapters::llm::openai::{
-    AuthCache, CacheError, RefreshFailure, RefreshSession, classify_rig_status,
+    AuthCache, CacheError, RefreshFailure, RefreshSession, RefreshedTokens, classify_rig_status,
 };
 
 #[test]
@@ -31,6 +31,24 @@ fn refresh_failure_is_classified_without_vendor_error_text() {
     // Then only the safe classification is observable by core logic.
     assert_eq!(failure, RefreshFailure::ReauthenticationRequired);
     assert!(!debug.contains("token"));
+}
+
+#[test]
+fn refreshed_tokens_debug_output_redacts_both_credentials() {
+    // Given access and refresh credentials returned by an OAuth rotation.
+    let tokens = RefreshedTokens {
+        access_token: "access-secret".to_owned(),
+        refresh_token: "refresh-secret".to_owned(),
+        expires_at: Some(42),
+    };
+
+    // When an error path formats the refresh result for diagnostics.
+    let debug = format!("{tokens:?}");
+
+    // Then only expiry metadata is observable.
+    assert!(!debug.contains("access-secret"));
+    assert!(!debug.contains("refresh-secret"));
+    assert!(debug.contains("42"));
 }
 
 #[test]
