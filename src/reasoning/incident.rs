@@ -27,6 +27,33 @@ pub struct AlertSignal {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AlertmanagerWebhook {
+    /// Alertmanager payload schema version.
+    #[serde(default)]
+    pub version: String,
+    /// Group identity assigned by Alertmanager.
+    #[serde(rename = "groupKey", default)]
+    pub group_key: String,
+    /// Number of alerts omitted by Alertmanager truncation.
+    #[serde(rename = "truncatedAlerts", default)]
+    pub truncated_alerts: u32,
+    /// Aggregate group status.
+    #[serde(default)]
+    pub status: String,
+    /// Configured receiver name.
+    #[serde(default)]
+    pub receiver: String,
+    /// Common labels for the alert group.
+    #[serde(rename = "groupLabels", default)]
+    pub group_labels: BTreeMap<String, String>,
+    /// Labels shared by all alerts in the group.
+    #[serde(rename = "commonLabels", default)]
+    pub common_labels: BTreeMap<String, String>,
+    /// Annotations shared by all alerts in the group.
+    #[serde(rename = "commonAnnotations", default)]
+    pub common_annotations: BTreeMap<String, String>,
+    /// Alertmanager external URL.
+    #[serde(rename = "externalURL", default)]
+    pub external_url: String,
     /// Alerts delivered in this webhook batch.
     #[serde(default)]
     pub alerts: Vec<AlertSignal>,

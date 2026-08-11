@@ -22,7 +22,7 @@ use ai_sre::{
         runtime::IncidentRuntime,
         storage::JournalStore,
     },
-    transport::{AlertIntake, IntakeConfig},
+    transport::{AlertIntake, IntakeCommand, IntakeConfig},
 };
 use thiserror::Error;
 use tokio::net::TcpListener;
@@ -42,6 +42,8 @@ enum MainError {
     Intake(#[from] ai_sre::transport::IntakeError),
     #[error("incident journal could not open")]
     Journal(#[from] ai_sre::reasoning::storage::JournalStoreError),
+    #[error("AI_SRE_ALERTMANAGER_TOKEN must be configured")]
+    MissingIntakeCredential,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -60,8 +62,8 @@ async fn main() -> Result<(), MainError> {
     let listener = TcpListener::bind(address.parse::<SocketAddr>()?).await?;
     let journal_path = env::var_os("AI_SRE_JOURNAL_PATH")
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/tmp/ai-sre-incidents.jsonl"));
-    let (sender, mut receiver) = mpsc::channel(64);
+        .unwrap_or_else(|| PathBuf::from("state/ai-sre.sqlite"));
+    let (sender, mut receiver) = mpsc::channel::<IntakeCommand>(64);
     let mut dispatcher = IncidentDispatcher::new(JournalStore::open(journal_path)?);
     let gemini = env::var("GEMINI_API_KEY").ok().map(GeminiClient::new);
     let deepseek = env::var("DEEPSEEK_API_KEY").ok().map(DeepSeekClient::new);
@@ -73,10 +75,14 @@ async fn main() -> Result<(), MainError> {
         _ => None,
     };
     tokio::spawn(async move {
-        while let Some(batch) = receiver.recv().await {
-            let incidents = match dispatcher.process_new(batch) {
-                Ok(incidents) => incidents,
+        while let Some(command) = receiver.recv().await {
+            let incidents = match dispatcher.process_new(command.batch) {
+                Ok(incidents) => {
+                    let _ = command.acknowledged.send(Ok(()));
+                    incidents
+                }
                 Err(error) => {
+                    let _ = command.acknowledged.send(Err(()));
                     eprintln!("incident dispatch stopped: {error}");
                     break;
                 }
@@ -128,7 +134,11 @@ async fn main() -> Result<(), MainError> {
             }
         }
     });
+    let intake_token =
+        env::var("AI_SRE_ALERTMANAGER_TOKEN").map_err(|_| MainError::MissingIntakeCredential)?;
+    let intake_next_token = env::var("AI_SRE_ALERTMANAGER_NEXT_TOKEN").ok();
     AlertIntake::new(IntakeConfig::default())
+        .with_bearer_tokens(intake_token, intake_next_token)
         .serve(listener, sender)
         .await?;
     Ok(())

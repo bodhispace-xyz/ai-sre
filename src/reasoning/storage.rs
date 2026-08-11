@@ -58,6 +58,14 @@ impl JournalStore {
     /// Opens or creates the SQLite database and validates its replay stream.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JournalStoreError> {
         let path = path.as_ref().to_owned();
+        if let Some(parent) = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+        {
+            std::fs::create_dir_all(parent).map_err(|error| {
+                JournalStoreError::Sqlite(rusqlite::Error::ToSqlConversionFailure(Box::new(error)))
+            })?;
+        }
         let connection = Connection::open(&path)?;
         connection.busy_timeout(std::time::Duration::from_secs(5))?;
         connection.pragma_update(None, "journal_mode", "WAL")?;
