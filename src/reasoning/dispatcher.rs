@@ -35,7 +35,7 @@ pub enum DispatchError {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LifecycleState {
-    Firing { episode: u64 },
+    Firing { episode: u64, completed: bool },
     Resolved { episode: u64 },
 }
 
@@ -57,6 +57,7 @@ impl IncidentDispatcher {
                         correlation_key(incident_id),
                         LifecycleState::Firing {
                             episode: episode_number(incident_id),
+                            completed: false,
                         },
                     );
                 }
@@ -68,7 +69,20 @@ impl IncidentDispatcher {
                         },
                     );
                 }
-                JournalEvent::AlertDeduplicated { .. }
+                JournalEvent::IncidentCompleted { incident_id } => {
+                    let key = correlation_key(incident_id);
+                    if let Some(LifecycleState::Firing { episode, .. }) = lifecycle.get(&key) {
+                        lifecycle.insert(
+                            key,
+                            LifecycleState::Firing {
+                                episode: *episode,
+                                completed: true,
+                            },
+                        );
+                    }
+                }
+                JournalEvent::IncidentResumed { .. }
+                | JournalEvent::AlertDeduplicated { .. }
                 | JournalEvent::EvidenceCommitted { .. }
                 | JournalEvent::PhaseStarted { .. }
                 | JournalEvent::PhaseFinished { .. }
@@ -110,12 +124,28 @@ impl IncidentDispatcher {
         let key = incident.correlation_id.clone();
         let current = self.lifecycle.get(&key).copied();
         match (incident.status, current) {
-            (AlertStatus::Firing, Some(LifecycleState::Firing { .. }))
+            (
+                AlertStatus::Firing,
+                Some(LifecycleState::Firing {
+                    completed: true, ..
+                }),
+            )
             | (AlertStatus::Resolved, Some(LifecycleState::Resolved { .. })) => {
                 self.journal.append(JournalEvent::AlertDeduplicated {
                     incident_id: incident.incident_id.clone(),
                 })?;
                 Ok((incident, DispatchOutcome::Deduplicated))
+            }
+            (
+                AlertStatus::Firing,
+                Some(LifecycleState::Firing {
+                    completed: false, ..
+                }),
+            ) => {
+                self.journal.append(JournalEvent::IncidentResumed {
+                    incident_id: incident.incident_id.clone(),
+                })?;
+                Ok((incident, DispatchOutcome::Accepted))
             }
             (AlertStatus::Firing, Some(LifecycleState::Resolved { episode })) => {
                 incident.episode = episode + 1;
@@ -128,6 +158,7 @@ impl IncidentDispatcher {
                     key,
                     LifecycleState::Firing {
                         episode: incident.episode,
+                        completed: false,
                     },
                 );
                 Ok((incident, DispatchOutcome::Accepted))
@@ -153,6 +184,7 @@ impl IncidentDispatcher {
                     key,
                     LifecycleState::Firing {
                         episode: incident.episode,
+                        completed: false,
                     },
                 );
                 Ok((incident, DispatchOutcome::Accepted))
@@ -180,6 +212,24 @@ impl IncidentDispatcher {
     /// Returns the durable journal for replay and later investigation wiring.
     pub fn journal(&self) -> &JournalStore {
         &self.journal
+    }
+
+    /// Durably marks a firing episode complete after report admission.
+    pub fn mark_completed(&mut self, incident_id: &str) -> Result<(), DispatchError> {
+        self.journal.append(JournalEvent::IncidentCompleted {
+            incident_id: incident_id.to_owned(),
+        })?;
+        let key = correlation_key(incident_id);
+        if let Some(LifecycleState::Firing { episode, .. }) = self.lifecycle.get(&key) {
+            self.lifecycle.insert(
+                key,
+                LifecycleState::Firing {
+                    episode: *episode,
+                    completed: true,
+                },
+            );
+        }
+        Ok(())
     }
 }
 

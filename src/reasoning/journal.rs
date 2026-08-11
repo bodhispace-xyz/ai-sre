@@ -42,6 +42,16 @@ pub enum JournalEvent {
         /// Stable incident identity.
         incident_id: String,
     },
+    /// Records that the incident workflow reached a terminal report state.
+    IncidentCompleted {
+        /// Stable incident episode identity.
+        incident_id: String,
+    },
+    /// Records restart/redelivery resumption of an incomplete episode.
+    IncidentResumed {
+        /// Stable incident episode identity.
+        incident_id: String,
+    },
     /// Records an evidence-board commit without storing credentials.
     EvidenceCommitted {
         /// Stable evidence identifier.
@@ -132,6 +142,8 @@ impl IncidentJournal {
                 JournalEvent::IncidentOpened { .. }
                 | JournalEvent::AlertDeduplicated { .. }
                 | JournalEvent::IncidentRecovered { .. }
+                | JournalEvent::IncidentCompleted { .. }
+                | JournalEvent::IncidentResumed { .. }
                 | JournalEvent::EvidenceCommitted { .. } => {}
                 JournalEvent::PhaseStarted { phase, at_ms } => {
                     if let Some(slot) = phase_starts.iter_mut().find(|(item, _)| item == phase) {

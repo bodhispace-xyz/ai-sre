@@ -32,6 +32,9 @@ fn dispatcher_deduplicates_replayed_incident_signals() {
             incidents: vec![incident.clone()],
         })
         .expect("first batch");
+    dispatcher
+        .mark_completed(&incident.incident_id)
+        .expect("complete incident");
     let second = dispatcher
         .process(IntakeBatch {
             incidents: vec![incident],

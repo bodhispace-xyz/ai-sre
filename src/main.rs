@@ -126,6 +126,11 @@ async fn main() -> Result<(), MainError> {
                     start_at_ms: 0,
                 })
                 .await;
+                if result.is_ok() {
+                    if let Err(error) = dispatcher.mark_completed(&incident.incident_id) {
+                        eprintln!("incident completion journal failed: {error}");
+                    }
+                }
                 if let (Some(ntfy), Ok(result)) = (ntfy.as_ref(), result) {
                     if let Err(error) = ntfy.publish(&result).await {
                         eprintln!("ntfy publication failed: {error}");
