@@ -9,6 +9,7 @@ use tokio::time::timeout;
 
 use thiserror::Error;
 
+use crate::adapters::context::ReadOnlyContext;
 use crate::adapters::grafana::context::{
     ContextBudget, ContextError, GrafanaContext, ReadOnlyRequest,
 };
@@ -68,6 +69,7 @@ pub enum InvestigationError {
 /// from the adapter board into the incident runtime.
 struct ToolExecutionContext<'a> {
     grafana: &'a GrafanaContext,
+    read_only: Option<&'a ReadOnlyContext>,
     runtime: &'a mut IncidentRuntime,
     journal: &'a mut JournalStore,
     journal_context: &'a JournalContext,
@@ -144,12 +146,30 @@ async fn execute_model_tool(
         context.loop_state.record_result(result.clone());
         return Ok(result);
     };
-    let mut result = tokio::time::timeout(
-        remaining,
-        context
-            .grafana
-            .execute_tool(context.board, context.context_budget, call),
-    )
+    let mut result = tokio::time::timeout(remaining, async {
+        match call.tool {
+            super::tools::ContextTool::QueryLogs | super::tools::ContextTool::QueryMetrics => {
+                context
+                    .grafana
+                    .execute_tool(context.board, context.context_budget, call)
+                    .await
+            }
+            super::tools::ContextTool::ReadDesiredState
+            | super::tools::ContextTool::ReadDeploymentHistory
+            | super::tools::ContextTool::ReadHealth => {
+                if let Some(adapter) = context.read_only {
+                    adapter.execute_tool(context.board, call).await
+                } else {
+                    ToolResult {
+                        call_id: call.call_id.clone(),
+                        class: ToolResultClass::Denied,
+                        evidence_id: None,
+                        detail: "read-only context adapter is not configured".to_owned(),
+                    }
+                }
+            }
+        }
+    })
     .await
     .unwrap_or_else(|_| ToolResult {
         call_id: call.call_id.clone(),
@@ -192,6 +212,8 @@ async fn execute_model_tool(
 pub struct LiveInvestigationInput<'a> {
     /// Read-only Grafana context.
     pub grafana: &'a GrafanaContext,
+    /// Optional server-owned Git, deployment, and health context adapter.
+    pub read_only: Option<&'a ReadOnlyContext>,
     /// Single-writer durable journal.
     pub journal: &'a mut JournalStore,
     /// Normalized incident signal.
@@ -216,6 +238,7 @@ pub async fn investigate_live(
 ) -> Result<InvestigationResult, InvestigationError> {
     let LiveInvestigationInput {
         grafana,
+        read_only,
         journal,
         signal,
         run_id,
@@ -290,6 +313,7 @@ pub async fn investigate_live(
         runtime,
         providers,
         grafana,
+        read_only,
         board: &mut tool_board,
         context_budget: &mut tool_context_budget,
         prompt: &prompt,
@@ -327,6 +351,7 @@ struct ContextLiveInput<'a> {
     runtime: &'a mut IncidentRuntime,
     providers: LiveProviders<'a>,
     grafana: &'a GrafanaContext,
+    read_only: Option<&'a ReadOnlyContext>,
     board: &'a mut super::evidence::EvidenceBoard,
     context_budget: &'a mut ContextBudget,
     prompt: &'a str,
@@ -368,6 +393,7 @@ async fn run_live_with_context(
         runtime,
         providers,
         grafana,
+        read_only,
         board,
         context_budget,
         prompt,
@@ -510,6 +536,7 @@ async fn run_live_with_context(
                         let result = {
                             let mut tool_context = ToolExecutionContext {
                                 grafana,
+                                read_only,
                                 runtime,
                                 journal,
                                 journal_context,
@@ -1018,6 +1045,7 @@ mod tests {
                 deepseek: None,
             },
             grafana: &grafana,
+            read_only: None,
             board: &mut board,
             context_budget: &mut budget,
             prompt: "diagnose",
