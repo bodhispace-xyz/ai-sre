@@ -4,6 +4,11 @@
 
 Continue BodhiSpace AI SRE from the completed product contract and reviewed implementation-ready MVP plan into the **first shadow-mode implementation slice**. The 2026-08-10 architecture review resolved all open items with research-backed decisions; do not restart architecture selection unless a committed U0 no-go criterion disproves a documented assumption.
 
+The 2026-08-11 deep-review follow-up ledger is tracked in
+[`docs/reviews/2026-08-11-deep-review-followups.md`](../reviews/2026-08-11-deep-review-followups.md).
+It records the completed U0 fixes and the explicit tool-loop gate that remains
+before model-directed Grafana queries are enabled in a live run.
+
 The user wants a strong industry/research-informed design without unnecessary infrastructure. The system is for a fully GitOps-managed homelab, receives operational notifications through ntfy, and should investigate incidents using GitOps state, Prometheus, Loki, deployment history, and scoped runtime evidence. It may eventually perform supervised remediation, but must not become an unrestricted autonomous shell agent.
 
 ## Canonical artifacts — read these instead of reconstructing the design
