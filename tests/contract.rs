@@ -5,3 +5,6 @@ mod providers;
 
 #[path = "contract/gcx.rs"]
 mod gcx;
+
+#[path = "contract/openai.rs"]
+mod openai;
