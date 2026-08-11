@@ -103,6 +103,7 @@ impl GcxRunner {
             .args(query.argv())
             .env_clear()
             .env("GCX_NO_UPDATE_NOTIFIER", "1")
+            .current_dir("/")
             .kill_on_drop(true)
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
@@ -260,6 +261,7 @@ impl GcxQuery {
         {
             return Err(GcxRunError::InvalidQuery);
         }
+        let normalized = expression.to_ascii_lowercase();
         let invalid_semantics = match kind {
             QueryKind::Logs => {
                 !expression.contains('{') || !expression.contains('}') || expression.contains("{}")
@@ -268,7 +270,26 @@ impl GcxQuery {
                 expression.contains("{}") || expression.contains("=~\".*\"") || expression == "*"
             }
         };
-        if invalid_semantics || expression.contains("=~\".*\"") || expression.contains("=~'.*'") {
+        let prohibited_operations = [
+            "--limit",
+            "limit 0",
+            "gcx api",
+            "http://",
+            "https://",
+            "topk(",
+            "bottomk(",
+            "count_values(",
+            "label_values(",
+            "series(",
+            "metadata(",
+        ];
+        if invalid_semantics
+            || expression.contains("=~\".*\"")
+            || expression.contains("=~'.*'")
+            || prohibited_operations
+                .iter()
+                .any(|operation| normalized.contains(operation))
+        {
             return Err(GcxRunError::InvalidQuery);
         }
         Ok(())
