@@ -6,10 +6,8 @@
 use std::{
     fmt,
     fs::{self, OpenOptions},
-    future::Future,
     io::Write,
     path::{Path, PathBuf},
-    pin::Pin,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -19,7 +17,7 @@ use rig_core::{
     completion::{AssistantContent, CompletionModel},
 };
 
-use crate::reasoning::live::LiveProvider;
+use crate::reasoning::live::{LiveCompletion, LiveProvider};
 use crate::reasoning::{contracts::DiagnosticReport, coordinator::FailureClass};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -319,12 +317,7 @@ pub async fn refresh_and_complete(
 }
 
 impl<'a> LiveProvider for (&'a OpenAiOAuth, &'a AuthCache) {
-    fn complete<'b>(
-        &'b self,
-        prompt: &'b str,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<(DiagnosticReport, Option<u64>), FailureClass>> + Send + 'b>,
-    > {
+    fn complete<'b>(&'b self, prompt: &'b str) -> LiveCompletion<'b> {
         Box::pin(async move { refresh_and_complete(self.0, self.1, prompt).await })
     }
 }

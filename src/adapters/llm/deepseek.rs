@@ -1,11 +1,11 @@
 //! DeepSeek transport and response normalization at the adapter boundary.
 
 use serde::{Deserialize, Serialize};
-use std::{future::Future, pin::Pin, time::Instant};
+use std::time::Instant;
 
 use crate::reasoning::contracts::{ContractError, DiagnosticReport};
 use crate::reasoning::coordinator::{AttemptFacts, FailureClass};
-use crate::reasoning::live::LiveProvider;
+use crate::reasoning::live::{LiveCompletion, LiveProvider};
 
 use super::{ApiKey, ProviderFailure, REQUEST_TIMEOUT, bounded_response_body, classify_status};
 
@@ -96,12 +96,7 @@ impl DeepSeekClient {
 }
 
 impl LiveProvider for DeepSeekClient {
-    fn complete<'a>(
-        &'a self,
-        prompt: &'a str,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<(DiagnosticReport, Option<u64>), FailureClass>> + Send + 'a>,
-    > {
+    fn complete<'a>(&'a self, prompt: &'a str) -> LiveCompletion<'a> {
         Box::pin(async move {
             self.complete_for_runtime(prompt)
                 .await

@@ -25,15 +25,15 @@ pub struct LiveProviders<'a> {
     pub deepseek: Option<&'a dyn LiveProvider>,
 }
 
+/// Provider-neutral completion future returned by adapter capabilities.
+pub type LiveCompletion<'a> = Pin<
+    Box<dyn Future<Output = Result<(DiagnosticReport, Option<u64>), FailureClass>> + Send + 'a>,
+>;
+
 /// Core-owned provider capability; vendor adapters implement this boundary.
 pub trait LiveProvider: Sync {
     /// Completes one bounded prompt and returns provider-neutral facts.
-    fn complete<'a>(
-        &'a self,
-        prompt: &'a str,
-    ) -> Pin<
-        Box<dyn Future<Output = Result<(DiagnosticReport, Option<u64>), FailureClass>> + Send + 'a>,
-    >;
+    fn complete<'a>(&'a self, prompt: &'a str) -> LiveCompletion<'a>;
 }
 
 /// Executes the configured provider order with durable budget admission.
