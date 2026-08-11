@@ -113,12 +113,12 @@ pub async fn investigate_live(
             record.source,
             record.query.clone(),
             record.payload.clone(),
-            start_at_ms,
+            runtime.elapsed_ms(),
         )?;
     }
     journal.append(JournalEvent::PhaseFinished {
         phase: Phase::Investigation,
-        at_ms: start_at_ms,
+        at_ms: runtime.elapsed_ms(),
     })?;
     let prompt = build_prompt(signal, runtime);
     let status = run_live(runtime, providers, &prompt, reservation, start_at_ms).await?;

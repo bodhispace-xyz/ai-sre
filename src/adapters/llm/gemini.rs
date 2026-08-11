@@ -1,10 +1,11 @@
 //! Gemini transport and response normalization at the adapter boundary.
 
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
+use std::{future::Future, pin::Pin, time::Instant};
 
 use crate::reasoning::contracts::{ContractError, DiagnosticReport};
 use crate::reasoning::coordinator::{AttemptFacts, FailureClass};
+use crate::reasoning::live::LiveProvider;
 
 use super::{ApiKey, ProviderFailure, REQUEST_TIMEOUT, bounded_response_body, classify_status};
 
@@ -90,6 +91,21 @@ impl GeminiClient {
             .map(|part| part.text.as_str())
             .ok_or(ProviderFailure::MalformedResponse)?;
         DiagnosticReport::from_provider_json(text).map_err(contract_failure)
+    }
+}
+
+impl LiveProvider for GeminiClient {
+    fn complete<'a>(
+        &'a self,
+        prompt: &'a str,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<(DiagnosticReport, Option<u64>), FailureClass>> + Send + 'a>,
+    > {
+        Box::pin(async move {
+            self.complete_for_runtime(prompt)
+                .await
+                .map(|(report, facts)| (report, facts.tokens))
+        })
     }
 }
 

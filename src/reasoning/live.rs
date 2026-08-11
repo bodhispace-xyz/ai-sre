@@ -4,14 +4,8 @@
 //! admitted provider, converts results into safe attempt facts, validates
 //! evidence citations, and advances finite fallback.
 
-use std::time::Instant;
+use std::{future::Future, pin::Pin, time::Instant};
 use tokio::time::timeout;
-
-use crate::adapters::llm::{
-    deepseek::DeepSeekClient,
-    gemini::GeminiClient,
-    openai::{AuthCache, OpenAiOAuth, refresh_and_complete},
-};
 
 use super::{
     budget::Reservation,
@@ -23,12 +17,23 @@ use super::{
 
 /// Optional live providers configured for one process.
 pub struct LiveProviders<'a> {
-    /// OpenAI OAuth and rotating refresh-token cache.
-    pub openai: Option<(&'a OpenAiOAuth, &'a AuthCache)>,
-    /// Gemini API client.
-    pub gemini: Option<&'a GeminiClient>,
-    /// DeepSeek API client.
-    pub deepseek: Option<&'a DeepSeekClient>,
+    /// OpenAI capability, if its live gate is accepted.
+    pub openai: Option<&'a dyn LiveProvider>,
+    /// Gemini capability, if its live gate is accepted.
+    pub gemini: Option<&'a dyn LiveProvider>,
+    /// DeepSeek capability, if its live gate is accepted.
+    pub deepseek: Option<&'a dyn LiveProvider>,
+}
+
+/// Core-owned provider capability; vendor adapters implement this boundary.
+pub trait LiveProvider: Sync {
+    /// Completes one bounded prompt and returns provider-neutral facts.
+    fn complete<'a>(
+        &'a self,
+        prompt: &'a str,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<(DiagnosticReport, Option<u64>), FailureClass>> + Send + 'a>,
+    >;
 }
 
 /// Executes the configured provider order with durable budget admission.
@@ -62,9 +67,18 @@ pub async fn run_live(
         let result = if let Some(remaining) = runtime.remaining() {
             timeout(remaining, async {
                 match provider {
-                    ProviderKind::OpenAi => run_openai(providers.openai, prompt).await,
-                    ProviderKind::Gemini => run_gemini(providers.gemini, prompt).await,
-                    ProviderKind::DeepSeek => run_deepseek(providers.deepseek, prompt).await,
+                    ProviderKind::OpenAi => match providers.openai {
+                        Some(provider) => provider.complete(prompt).await,
+                        None => Err(FailureClass::TemporarilyUnavailable),
+                    },
+                    ProviderKind::Gemini => match providers.gemini {
+                        Some(provider) => provider.complete(prompt).await,
+                        None => Err(FailureClass::TemporarilyUnavailable),
+                    },
+                    ProviderKind::DeepSeek => match providers.deepseek {
+                        Some(provider) => provider.complete(prompt).await,
+                        None => Err(FailureClass::TemporarilyUnavailable),
+                    },
                     ProviderKind::Deterministic => Ok((
                         DiagnosticReport {
                             summary: "No live provider was available; deterministic enrichment is required."
@@ -110,41 +124,5 @@ pub async fn run_live(
             Err(failure) => runtime.fail_provider(provider, failure, facts, at_ms)?,
         }
         at_ms = runtime.elapsed_ms();
-    }
-}
-
-async fn run_openai(
-    provider: Option<(&OpenAiOAuth, &AuthCache)>,
-    prompt: &str,
-) -> Result<(DiagnosticReport, Option<u64>), FailureClass> {
-    match provider {
-        Some((oauth, cache)) => refresh_and_complete(oauth, cache, prompt).await,
-        None => Err(FailureClass::TemporarilyUnavailable),
-    }
-}
-
-async fn run_gemini(
-    provider: Option<&GeminiClient>,
-    prompt: &str,
-) -> Result<(DiagnosticReport, Option<u64>), FailureClass> {
-    match provider {
-        Some(client) => client
-            .complete_for_runtime(prompt)
-            .await
-            .map(|(report, facts)| (report, facts.tokens)),
-        None => Err(FailureClass::TemporarilyUnavailable),
-    }
-}
-
-async fn run_deepseek(
-    provider: Option<&DeepSeekClient>,
-    prompt: &str,
-) -> Result<(DiagnosticReport, Option<u64>), FailureClass> {
-    match provider {
-        Some(client) => client
-            .complete_for_runtime(prompt)
-            .await
-            .map(|(report, facts)| (report, facts.tokens)),
-        None => Err(FailureClass::TemporarilyUnavailable),
     }
 }

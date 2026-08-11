@@ -6,8 +6,10 @@
 use std::{
     fmt,
     fs::{self, OpenOptions},
+    future::Future,
     io::Write,
     path::{Path, PathBuf},
+    pin::Pin,
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -17,6 +19,7 @@ use rig_core::{
     completion::{AssistantContent, CompletionModel},
 };
 
+use crate::reasoning::live::LiveProvider;
 use crate::reasoning::{contracts::DiagnosticReport, coordinator::FailureClass};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -313,6 +316,17 @@ pub async fn refresh_and_complete(
             CacheError::Io => FailureClass::TemporarilyUnavailable,
         })?;
     complete_with_rig(refreshed.access_token, prompt).await
+}
+
+impl<'a> LiveProvider for (&'a OpenAiOAuth, &'a AuthCache) {
+    fn complete<'b>(
+        &'b self,
+        prompt: &'b str,
+    ) -> Pin<
+        Box<dyn Future<Output = Result<(DiagnosticReport, Option<u64>), FailureClass>> + Send + 'b>,
+    > {
+        Box::pin(async move { refresh_and_complete(self.0, self.1, prompt).await })
+    }
 }
 
 fn classify_rig_failure(error: rig_core::completion::CompletionError) -> FailureClass {
