@@ -2,7 +2,47 @@
 
 use std::collections::BTreeSet;
 
+use ai_sre::adapters::llm::{
+    ApiKey, ProviderFailure, deepseek::DeepSeekClient, gemini::GeminiClient,
+};
 use ai_sre::reasoning::contracts::{ContractError, DiagnosticReport, EvidenceRef};
+
+#[test]
+fn api_keys_are_redacted_and_provider_clients_normalize_common_reports() {
+    // Given provider envelopes containing the same strict diagnostic JSON.
+    let report = r#"{"summary":"The API is returning elevated 5xx responses.","evidence":[{"evidence_id":"metrics-001"}]}"#;
+    let gemini = format!(
+        r#"{{"candidates":[{{"content":{{"parts":[{{"text":{}}}]}}}}]}}"#,
+        serde_json::to_string(report).unwrap()
+    );
+    let deepseek = format!(
+        r#"{{"choices":[{{"message":{{"content":{}}}}}]}}"#,
+        serde_json::to_string(report).unwrap()
+    );
+
+    // When both adapters normalize their vendor envelopes.
+    let gemini_result = GeminiClient::new("gemini-secret").normalize_report(&gemini);
+    let deepseek_result = DeepSeekClient::new("deepseek-secret").normalize_report(&deepseek);
+
+    // Then both return the same provider-neutral artifact and secrets stay redacted.
+    assert_eq!(gemini_result, deepseek_result);
+    assert!(!format!("{:?}", ApiKey::new("gemini-secret")).contains("gemini-secret"));
+}
+
+#[test]
+fn malformed_gemini_and_deepseek_envelopes_fail_without_vendor_details() {
+    // Given envelopes with no usable model message.
+    let gemini = r#"{"candidates":[]}"#;
+    let deepseek = r#"{"choices":[]}"#;
+
+    // When each adapter attempts normalization.
+    let gemini_result = GeminiClient::new("gemini-secret").normalize_report(gemini);
+    let deepseek_result = DeepSeekClient::new("deepseek-secret").normalize_report(deepseek);
+
+    // Then both expose only the shared safe failure classification.
+    assert_eq!(gemini_result, Err(ProviderFailure::MalformedResponse));
+    assert_eq!(deepseek_result, Err(ProviderFailure::MalformedResponse));
+}
 
 #[test]
 fn diagnostic_report_accepts_only_citations_from_the_evidence_board() {
