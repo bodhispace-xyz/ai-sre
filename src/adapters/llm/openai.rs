@@ -11,6 +11,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use rig_core::client::ProviderClient;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -220,6 +221,21 @@ impl Default for OpenAiOAuth {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Builds a Rig ChatGPT client from a short-lived access token.
+///
+/// The service never asks Rig to own refresh persistence or interactive login;
+/// [`AuthCache`] and [`OpenAiOAuth`] perform those operations at this boundary.
+pub fn rig_client(
+    access_token: impl Into<String>,
+) -> Result<rig_core::providers::chatgpt::Client, rig_core::client::ProviderClientError> {
+    rig_core::providers::chatgpt::Client::from_val(
+        rig_core::providers::chatgpt::ChatGPTAuth::AccessToken {
+            access_token: access_token.into(),
+            account_id: None,
+        },
+    )
 }
 
 #[derive(Debug, Deserialize)]
