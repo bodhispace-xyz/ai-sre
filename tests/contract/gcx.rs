@@ -102,6 +102,26 @@ fn broad_or_high_cardinality_queries_are_rejected_before_spawn() {
     );
 }
 
+#[test]
+fn broad_query_policy_rejects_whitespace_equivalents() {
+    // Given equivalent expensive-query spellings with deliberately varied whitespace.
+    let queries = [
+        GcxQuery::metrics("topk (100, rate(up[5m]))", "prometheus"),
+        GcxQuery::metrics("rate(up{ }[5m])", "prometheus"),
+        GcxQuery::logs("{service=\"api\"} --limit\t0", "loki"),
+    ];
+
+    // When the pure policy validator canonicalizes their lexical spacing.
+    let results = queries.map(|query| query.validate(4_096));
+
+    // Then equivalent broad or unbounded requests are rejected consistently.
+    assert!(
+        results
+            .iter()
+            .all(|result| *result == Err(GcxRunError::InvalidQuery))
+    );
+}
+
 #[tokio::test]
 async fn runner_returns_bounded_stdout_from_a_successful_process() {
     // Given a harmless fixture process and a small output budget.

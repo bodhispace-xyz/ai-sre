@@ -72,6 +72,9 @@ impl EvidenceBoard {
         if self.records.len() >= MAX_EVIDENCE_RECORDS {
             return Err(EvidenceError::RecordLimitExceeded);
         }
+        if payload.len() > MAX_EVIDENCE_PAYLOAD_BYTES {
+            return Err(EvidenceError::PayloadTooLarge);
+        }
         let query = redact_text(&query.into());
         if query.len() > MAX_EVIDENCE_QUERY_BYTES {
             return Err(EvidenceError::QueryTooLarge);
@@ -115,11 +118,7 @@ fn redact_json(value: &mut serde_json::Value) {
     match value {
         serde_json::Value::Object(object) => {
             for (key, child) in object.iter_mut() {
-                let sensitive = key.to_ascii_lowercase().contains("token")
-                    || key.to_ascii_lowercase().contains("secret")
-                    || key.to_ascii_lowercase().contains("password")
-                    || key.to_ascii_lowercase().contains("api_key")
-                    || key.eq_ignore_ascii_case("authorization");
+                let sensitive = is_sensitive_key(key);
                 if sensitive {
                     *child = serde_json::Value::String("[REDACTED]".to_owned());
                 } else {
@@ -134,28 +133,137 @@ fn redact_json(value: &mut serde_json::Value) {
 }
 
 fn redact_text(input: &str) -> String {
-    let mut redact_next = false;
-    input
-        .split_whitespace()
-        .map(|word| {
-            if redact_next {
-                redact_next = false;
-                return "[REDACTED]";
+    let chars = input.chars().collect::<Vec<_>>();
+    let mut output = String::with_capacity(input.len());
+    let mut index = 0;
+    while index < chars.len() {
+        if let Some((key_len, is_authorization)) = sensitive_assignment(&chars, index) {
+            output.extend(chars[index..index + key_len].iter());
+            index += key_len;
+            while index < chars.len() && chars[index].is_whitespace() {
+                output.push(chars[index]);
+                index += 1;
             }
-            let lower = word.to_ascii_lowercase();
-            if lower == "bearer" {
-                redact_next = true;
-                return word;
+            if index < chars.len() && matches!(chars[index], ':' | '=') {
+                output.push(chars[index]);
+                index += 1;
             }
-            if ["token=", "password=", "secret=", "api_key=", "apikey="]
-                .iter()
-                .any(|prefix| lower.starts_with(prefix))
-            {
-                "[REDACTED]"
+            while index < chars.len() && chars[index].is_whitespace() {
+                output.push(chars[index]);
+                index += 1;
+            }
+            if index < chars.len() && matches!(chars[index], '\"' | '\'') {
+                let quote = chars[index];
+                output.push(quote);
+                index += 1;
+                output.push_str("[REDACTED]");
+                while index < chars.len() && chars[index] != quote {
+                    index += 1;
+                }
+                if index < chars.len() {
+                    output.push(quote);
+                    index += 1;
+                }
             } else {
-                word
+                output.push_str("[REDACTED]");
+                while index < chars.len()
+                    && if is_authorization {
+                        !matches!(chars[index], '\n' | '\r')
+                    } else {
+                        !chars[index].is_whitespace() && !matches!(chars[index], ',' | '}' | ']')
+                    }
+                {
+                    index += 1;
+                }
             }
-        })
-        .collect::<Vec<_>>()
-        .join(" ")
+            continue;
+        }
+        if let Some(token_len) = bearer_prefix(&chars, index) {
+            output.extend(chars[index..index + token_len].iter());
+            index += token_len;
+            while index < chars.len() && chars[index].is_whitespace() {
+                output.push(chars[index]);
+                index += 1;
+            }
+            if index < chars.len() {
+                output.push_str("[REDACTED]");
+                while index < chars.len() && !chars[index].is_whitespace() {
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        output.push(chars[index]);
+        index += 1;
+    }
+    output
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let normalized = key.to_ascii_lowercase().replace(['-', '.'], "_");
+    normalized.contains("token")
+        || normalized.contains("secret")
+        || normalized.contains("password")
+        || normalized.contains("apikey")
+        || normalized.contains("api_key")
+        || normalized.contains("authorization")
+        || normalized.contains("credential")
+        || normalized.contains("private_key")
+}
+
+fn sensitive_assignment(chars: &[char], index: usize) -> Option<(usize, bool)> {
+    const KEYS: [&str; 9] = [
+        "access_token",
+        "authorization",
+        "private_key",
+        "credential",
+        "password",
+        "api_key",
+        "apikey",
+        "secret",
+        "token",
+    ];
+    let boundary = index == 0 || !chars[index - 1].is_ascii_alphanumeric();
+    if !boundary {
+        return None;
+    }
+    KEYS.iter().find_map(|key| {
+        let key_chars = key.chars().collect::<Vec<_>>();
+        if chars.get(index..index + key_chars.len())? != key_chars.as_slice()
+            && !chars
+                .get(index..index + key_chars.len())?
+                .iter()
+                .zip(key_chars.iter())
+                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+        {
+            return None;
+        }
+        let mut cursor = index + key_chars.len();
+        while cursor < chars.len() && chars[cursor].is_whitespace() {
+            cursor += 1;
+        }
+        if !matches!(chars.get(cursor), Some(':' | '=')) {
+            return None;
+        }
+        Some((key_chars.len(), *key == "authorization"))
+    })
+}
+
+fn bearer_prefix(chars: &[char], index: usize) -> Option<usize> {
+    const BEARER: &str = "bearer";
+    let boundary = index == 0 || !chars[index - 1].is_ascii_alphanumeric();
+    let candidate = chars.get(index..index + BEARER.len())?;
+    if boundary
+        && candidate
+            .iter()
+            .zip(BEARER.chars())
+            .all(|(left, right)| left.eq_ignore_ascii_case(&right))
+        && chars
+            .get(index + BEARER.len())
+            .is_some_and(|character| character.is_whitespace())
+    {
+        Some(BEARER.len())
+    } else {
+        None
+    }
 }

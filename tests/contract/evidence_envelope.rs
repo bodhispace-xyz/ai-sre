@@ -94,3 +94,30 @@ fn oversized_query_provenance_is_rejected_without_mutation() {
     assert_eq!(result, Err(EvidenceError::QueryTooLarge));
     assert!(board.records().is_empty());
 }
+
+#[test]
+fn redaction_covers_camel_case_keys_embedded_labels_and_preserves_layout() {
+    // Given credentials in common structured, query, and plaintext forms.
+    let mut board = EvidenceBoard::default();
+    let query = "{password=\"query-secret\"}\n\tservice=\"api\"";
+    let payload = br#"{"apiKey":"key-secret","message":"Authorization: Basic basic-secret","log":"line one\nline two"}"#;
+
+    // When the evidence boundary redacts the result.
+    board
+        .commit(EvidenceSource::GrafanaLogs, query, payload.to_vec())
+        .expect("evidence should commit");
+
+    // Then all credential values are removed while non-secret layout remains readable.
+    let record = &board.records()[0];
+    let visible = format!(
+        "{} {}",
+        record.query,
+        String::from_utf8_lossy(&record.payload)
+    );
+    for secret in ["query-secret", "key-secret", "basic-secret"] {
+        assert!(!visible.contains(secret), "secret leaked: {secret}");
+    }
+    assert!(record.query.contains('\n'));
+    assert!(record.query.contains('\t'));
+    assert!(String::from_utf8_lossy(&record.payload).contains("line one\\nline two"));
+}

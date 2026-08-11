@@ -78,6 +78,9 @@ pub enum ConfigError {
     /// A process resource bound is zero and would not provide a safe limit.
     #[error("process resource limit must be greater than zero")]
     ZeroLimit,
+    /// The pinned child executable must not depend on the caller's working directory.
+    #[error("gcx binary path must be absolute")]
+    RelativeGcxPath,
     /// The provider order is invalid.
     #[error("provider order is invalid")]
     InvalidProviderOrder,
@@ -118,6 +121,9 @@ impl AppConfig {
             || self.grafana.metrics_datasource.trim().is_empty()
         {
             return Err(ConfigError::EmptyValue);
+        }
+        if !self.gcx_binary.is_absolute() {
+            return Err(ConfigError::RelativeGcxPath);
         }
         if self.gcx_timeout_secs == 0
             || self.gcx_max_output_bytes == 0

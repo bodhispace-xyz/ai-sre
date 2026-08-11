@@ -261,19 +261,23 @@ impl GcxQuery {
         {
             return Err(GcxRunError::InvalidQuery);
         }
-        let normalized = expression.to_ascii_lowercase();
+        let normalized = expression
+            .chars()
+            .filter(|character| !character.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase();
         let invalid_semantics = match kind {
             QueryKind::Logs => {
-                !expression.contains('{') || !expression.contains('}') || expression.contains("{}")
+                !normalized.contains('{') || !normalized.contains('}') || normalized.contains("{}")
             }
             QueryKind::Metrics => {
-                expression.contains("{}") || expression.contains("=~\".*\"") || expression == "*"
+                normalized.contains("{}") || normalized.contains("=~\".*\"") || normalized == "*"
             }
         };
         let prohibited_operations = [
             "--limit",
-            "limit 0",
-            "gcx api",
+            "limit0",
+            "gcxapi",
             "http://",
             "https://",
             "topk(",
@@ -284,8 +288,8 @@ impl GcxQuery {
             "metadata(",
         ];
         if invalid_semantics
-            || expression.contains("=~\".*\"")
-            || expression.contains("=~'.*'")
+            || normalized.contains("=~\".*\"")
+            || normalized.contains("=~'.*'")
             || prohibited_operations
                 .iter()
                 .any(|operation| normalized.contains(operation))
