@@ -29,6 +29,9 @@ pub struct DiagnosticReport {
 /// Reasons a provider-neutral reasoning artifact fails its core contract.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ContractError {
+    /// The provider response cannot be decoded as the core report contract.
+    #[error("provider response does not match the diagnostic contract")]
+    MalformedProviderResponse,
     /// A citation does not exist on the current run-scoped evidence board.
     #[error("diagnostic report cites unknown evidence id: {0}")]
     UnknownEvidence(String),
@@ -41,6 +44,14 @@ pub enum ContractError {
 }
 
 impl DiagnosticReport {
+    /// Converts untrusted provider JSON into the provider-neutral report type.
+    ///
+    /// The parser deliberately erases provider-specific parse details so error
+    /// messages cannot accidentally disclose response content or credentials.
+    pub fn from_provider_json(input: &str) -> Result<Self, ContractError> {
+        serde_json::from_str(input).map_err(|_| ContractError::MalformedProviderResponse)
+    }
+
     /// Validates the report against the immutable evidence board for this run.
     pub fn validate_against(
         &self,

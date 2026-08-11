@@ -9,6 +9,11 @@ gates:
       - cancellation joins spawned work without leaks
   gcx:
     status: pending
+    qualification_evidence:
+      - binary_sha256
+      - runtime_digest
+      - sbom_digest
+      - self_update_disabled
     criteria:
       - bounded structured PromQL and LogQL queries work against the installed Grafana datasources
       - the pinned binary cannot self-update and runs only the reviewed query subcommands

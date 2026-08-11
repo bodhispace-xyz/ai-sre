@@ -4,6 +4,11 @@
 
 Continue BodhiSpace AI SRE from the completed product contract and reviewed implementation-ready MVP plan into the **first shadow-mode implementation slice**. The 2026-08-10 architecture review resolved all open items with research-backed decisions; do not restart architecture selection unless a committed U0 no-go criterion disproves a documented assumption.
 
+The 2026-08-11 deep-review follow-up ledger is tracked in
+[`docs/reviews/2026-08-11-deep-review-followups.md`](../reviews/2026-08-11-deep-review-followups.md).
+It records the completed U0 fixes and the explicit tool-loop gate that remains
+before model-directed Grafana queries are enabled in a live run.
+
 The user wants a strong industry/research-informed design without unnecessary infrastructure. The system is for a fully GitOps-managed homelab, receives operational notifications through ntfy, and should investigate incidents using GitOps state, Prometheus, Loki, deployment history, and scoped runtime evidence. It may eventually perform supervised remediation, but must not become an unrestricted autonomous shell agent.
 
 ## Canonical artifacts — read these instead of reconstructing the design
@@ -99,7 +104,7 @@ The previous self-referential global Docker Loki driver caused Docker/Loki lifec
 2. Inspect the AI-SRE repo status and repository instructions; preserve untracked editor files.
 3. Review and ship the current documentation revision separately from scaffolding; do not silently combine the two concerns. Luna is suitable for the explicit implementation units after the plan is frozen, with a stronger reasoning review for U8-U10, Gate C/GitHub authority, and promotion security.
 4. Execute U0 first as a compatibility gate and the first vertical test-first slice: establish the library/thin-binary dependency boundary; commit Rig/`gcx` no-go criteria; prove OpenAI refresh and provider contracts; pin and verify `gcx`; exercise the disposable forced-command protocol stub; and stop for a reviewed adapter change if any no-go condition holds.
-5. If the foundation gate passes, implement U1-U6 to deliver the first vertical shadow slice. Initial deployment needs deterministic enrichment, OpenAI, and `gcx`; admit Gemini then DeepSeek independently and collect all-provider Gate A evidence before supervised staging.
+5. If the foundation gate passes, merge the U0 review-fix branch only with Gemini and DeepSeek still disabled. Then branch from the merged U0 tip for U1 follow-up work: durable incident/daily/monthly cost ledgers, explicit incident/run-scoped journal facts, conservative usage reconciliation, and rebuildable efficiency projections. Initial deployment needs deterministic enrichment, OpenAI, and `gcx`; admit Gemini then DeepSeek independently only after their separate price, ceiling, egress, and live-contract gates pass.
 6. U10 may be implemented beside U2-U6 but must expose no runtime credential or action policy. Keep every mutation and approval policy unloadable in Release 1.
 7. After Gate A, complete Release 1.2 U9/Gate C before runtime mutation. In parallel, implement U7 Tempo and stage U8 against U10 with the gateway credential disabled. Gate B—and only Gate B—permits the IT Tools restart credential/policy.
 

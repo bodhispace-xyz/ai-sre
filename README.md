@@ -51,3 +51,33 @@ The complete product contract, MVP scope, acceptance examples, capability bounda
 
 Contributor-facing Rust documentation and test readability rules are in
 [Rust documentation and test style](docs/engineering/rust-documentation-and-test-style.md).
+
+## Local development
+
+The `Makefile` keeps local validation aligned with the Rust CI workflow:
+
+```text
+make run ARGS="--help"  # run the binary
+make test                # run the CI nextest profile
+make ci                  # run formatting, Clippy, tests, docs, and cargo-deny
+```
+
+Install the pinned CI-only tools once with `make install-ci-tools`.
+Use `make help` to see every available command.
+
+If Nix and direnv are installed, run `direnv allow` once in the repository.
+The committed `.envrc` then activates the locked project development shell on
+entry; `nix develop` remains available as the explicit equivalent.
+
+### Paid-provider budget configuration
+
+Gemini and DeepSeek remain disabled unless all of the following are present:
+
+- `GEMINI_GATE=accepted` or `DEEPSEEK_GATE=accepted`;
+- the provider API key and non-empty price catalog;
+- `AI_SRE_DAILY_COST_LIMIT_MICRO_USD` and `AI_SRE_MONTHLY_COST_LIMIT_MICRO_USD`;
+- current window identifiers in `AI_SRE_BUDGET_DAY` and `AI_SRE_BUDGET_MONTH`.
+
+Each investigation reserves its worst-case paid-provider amount atomically in
+the incident, day, and month ledgers. Unknown provider usage remains reserved;
+only trustworthy actual usage can reconcile and release the difference.
