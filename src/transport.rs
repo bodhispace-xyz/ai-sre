@@ -4,7 +4,7 @@
 //! before JSON parsing, normalizes only the documented webhook route, and
 //! waits for the journal-owning worker to confirm durable admission.
 
-use std::fmt;
+use std::{fmt, time::Duration};
 
 use axum::{
     Router,
@@ -27,6 +27,8 @@ use crate::reasoning::incident::{
 
 /// The only HTTP route exposed by this intake.
 pub const ALERTMANAGER_PATH: &str = "/webhooks/alertmanager";
+/// Maximum time the HTTP boundary waits for durable worker admission.
+pub const INTAKE_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Bounded request settings for the intake listener.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,16 +238,19 @@ async fn handle_webhook(
         }
         let batch = parse_body(&body)?;
         let (acknowledged, response) = oneshot::channel();
-        state
-            .sender
-            .send(IntakeCommand {
+        tokio::time::timeout(
+            INTAKE_ACK_TIMEOUT,
+            state.sender.send(IntakeCommand {
                 batch,
                 acknowledged,
-            })
+            }),
+        )
+        .await
+        .map_err(|_| IntakeError::QueueUnavailable)?
+        .map_err(|_| IntakeError::QueueUnavailable)?;
+        tokio::time::timeout(INTAKE_ACK_TIMEOUT, response)
             .await
-            .map_err(|_| IntakeError::QueueUnavailable)?;
-        response
-            .await
+            .map_err(|_| IntakeError::QueueUnavailable)?
             .map_err(|_| IntakeError::QueueUnavailable)?
             .map_err(|_| IntakeError::QueueUnavailable)?;
         Ok::<_, IntakeError>(())

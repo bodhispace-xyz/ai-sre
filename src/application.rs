@@ -211,6 +211,8 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
                         .reconcile_cost(&run_id, actual_cost)
                     {
                         eprintln!("cost reservation reconciliation failed: {error}");
+                        let _ = worker_failed.send(());
+                        break 'worker;
                     }
                 }
                 if result.is_ok() {
@@ -241,8 +243,16 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
         .with_bearer_tokens(intake_token, intake_next_token)
         .serve_with_metrics(listener, sender, metrics);
     tokio::pin!(intake);
+    tokio::pin!(worker);
     tokio::select! {
-        result = &mut intake => result.map_err(ApplicationError::from),
+        result = &mut intake => {
+            worker.abort();
+            result.map_err(ApplicationError::from)
+        },
+        result = &mut worker => {
+            eprintln!("incident worker exited unexpectedly: {result:?}");
+            Err(ApplicationError::WorkerFailed)
+        },
         _ = worker_failed_rx => {
             worker.abort();
             Err(ApplicationError::WorkerFailed)
