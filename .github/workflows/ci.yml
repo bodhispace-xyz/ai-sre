@@ -1,0 +1,73 @@
+name: Rust CI
+
+on:
+  pull_request:
+    branches:
+      - develop
+      - main
+  push:
+    branches:
+      - develop
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rust-ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_INCREMENTAL: "0"
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: "1"
+
+jobs:
+  validate:
+    name: Format, lint, test, docs, and dependencies
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        # actions/checkout v7.0.1, verified 2026-08-11.
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false
+
+      - name: Verify pinned Rust toolchain
+        run: |
+          rustc --version --verbose
+          cargo --version
+
+      - name: Restore Rust build cache
+        # Swatinem/rust-cache v2.9.2, verified 2026-08-11.
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
+
+      - name: Install pinned CI tools
+        # taiki-e/install-action v2.85.11, verified 2026-08-11.
+        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026
+        with:
+          tool: cargo-nextest@0.9.143,cargo-deny@0.20.2
+          fallback: none
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Run tests
+        run: cargo nextest run --all-targets --all-features --profile ci
+
+      - name: Run documentation tests
+        run: cargo test --doc --all-features
+
+      - name: Build documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --no-deps --all-features
+
+      - name: Check dependency policy
+        run: cargo deny check
