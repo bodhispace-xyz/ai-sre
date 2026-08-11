@@ -127,21 +127,32 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
                     }
                 };
                 let start_at_ms = runtime.elapsed_ms();
+                let run_id = format!("{}-{}", incident.incident_id, now_ms());
+                let global_budget_admitted = reserve_paid_budget(
+                    dispatcher.journal_mut(),
+                    &run_id,
+                    &reasoning_config,
+                    gemini.is_some() as u64 + deepseek.is_some() as u64,
+                );
+                let paid_provider_count = gemini.is_some() as u64 + deepseek.is_some() as u64;
                 let result = investigate_live(LiveInvestigationInput {
                     grafana: &application.grafana,
                     journal: dispatcher.journal_mut(),
                     signal: &incident,
+                    run_id: &run_id,
                     runtime: &mut runtime,
                     providers: LiveProviders {
                         openai: rig_gate_accepted
                             .then_some((&application.openai_oauth, &application.openai_cache))
                             .as_ref()
                             .map(|provider| provider as &dyn LiveProvider),
-                        gemini: gemini
-                            .as_ref()
+                        gemini: global_budget_admitted
+                            .then_some(gemini.as_ref())
+                            .flatten()
                             .map(|provider| provider as &dyn LiveProvider),
-                        deepseek: deepseek
-                            .as_ref()
+                        deepseek: global_budget_admitted
+                            .then_some(deepseek.as_ref())
+                            .flatten()
                             .map(|provider| provider as &dyn LiveProvider),
                     },
                     reservation: Reservation {
@@ -154,6 +165,17 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
                     start_at_ms,
                 })
                 .await;
+                if paid_provider_count > 0 && global_budget_admitted {
+                    let actual_cost = runtime.journal().project();
+                    let actual_cost = (actual_cost.unknown_cost_attempts == 0)
+                        .then_some(actual_cost.known_cost_micro_usd);
+                    if let Err(error) = dispatcher
+                        .journal_mut()
+                        .reconcile_cost(&run_id, actual_cost)
+                    {
+                        eprintln!("cost reservation reconciliation failed: {error}");
+                    }
+                }
                 if result.is_ok() {
                     let outbox = result.as_ref().ok().map(|result| OutboxMessage {
                         delivery_id: format!("{}:report", result.incident_id),
@@ -222,7 +244,53 @@ fn gated_api_provider(key: &str, gate: &str, price_catalog: &str) -> Option<Stri
     (env::var(gate).ok().as_deref() == Some("accepted"))
         .then(|| env::var(price_catalog).ok())
         .flatten()?;
+    global_cost_limits()?;
     Some(api_key)
+}
+
+fn global_cost_limits() -> Option<(u64, u64, String, String)> {
+    let daily = env::var("AI_SRE_DAILY_COST_LIMIT_MICRO_USD")
+        .ok()?
+        .parse::<u64>()
+        .ok()?;
+    let monthly = env::var("AI_SRE_MONTHLY_COST_LIMIT_MICRO_USD")
+        .ok()?
+        .parse::<u64>()
+        .ok()?;
+    let day = env::var("AI_SRE_BUDGET_DAY").ok()?;
+    let month = env::var("AI_SRE_BUDGET_MONTH").ok()?;
+    (daily > 0 && monthly > 0 && !day.trim().is_empty() && !month.trim().is_empty())
+        .then_some((daily, monthly, day, month))
+}
+
+fn reserve_paid_budget(
+    journal: &mut JournalStore,
+    run_id: &str,
+    reasoning_config: &crate::reasoning::coordinator::ReasoningConfig,
+    paid_provider_count: u64,
+) -> bool {
+    let Some((daily, monthly, day, month)) = global_cost_limits() else {
+        return paid_provider_count == 0;
+    };
+    let Some(incident_ceiling) = reasoning_config.budget.max_cost_micro_usd else {
+        return false;
+    };
+    let amount = 250_000_u64.saturating_mul(paid_provider_count);
+    if amount == 0 {
+        return true;
+    }
+    let scopes = [
+        (format!("incident:{}", run_id), incident_ceiling),
+        (format!("day:{day}"), daily),
+        (format!("month:{month}"), monthly),
+    ];
+    let scope_refs = scopes
+        .iter()
+        .map(|(scope, ceiling)| (scope.as_str(), *ceiling))
+        .collect::<Vec<_>>();
+    journal
+        .reserve_cost(run_id, amount, &scope_refs, now_ms())
+        .is_ok()
 }
 
 /// Parses a configured listener address for callers that keep binding outside
