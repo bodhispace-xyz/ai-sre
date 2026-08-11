@@ -163,7 +163,7 @@ async fn context_tool_execution_rejects_grafana_capabilities_at_the_wrong_bounda
 
     // Then the adapter refuses cross-capability dispatch without process execution.
     assert_eq!(result.class, ToolResultClass::Denied);
-    assert!(board.records().is_empty());
+    assert_eq!(board.records().len(), 1);
 }
 
 #[tokio::test]

@@ -59,7 +59,7 @@ impl ReadOnlyCommand {
         if !binary.is_absolute() || query.trim().is_empty() || query.len() > MAX_SELECTOR_BYTES {
             return Err(ContextError::InvalidPlan);
         }
-        if args.iter().any(|arg| arg.len() > MAX_SELECTOR_BYTES) {
+        if args.len() > 64 || args.iter().any(|arg| arg.len() > MAX_SELECTOR_BYTES) {
             return Err(ContextError::InvalidPlan);
         }
         Ok(Self {
@@ -302,18 +302,16 @@ impl ReadOnlyContext {
             ContextTool::DiscoverObservability => EvidenceSource::ObservabilityMetadata,
         };
         let result = match call.tool {
-            ContextTool::ReadDesiredState => {
-                let Some((revision, path)) = call.query.split_once('\n') else {
-                    return denied_result(call);
-                };
-                self.desired_state(board, revision, path).await
-            }
+            ContextTool::ReadDesiredState => match call.query.split_once('\n') {
+                Some((revision, path)) => self.desired_state(board, revision, path).await,
+                None => Err(ContextError::InvalidPlan),
+            },
             ContextTool::ReadDeploymentHistory => {
                 self.deployment_history(board, &call.query, 20).await
             }
             ContextTool::ReadHealth => self.health(board, call.query.trim()).await,
             ContextTool::DiscoverObservability => self.discover(board),
-            ContextTool::QueryLogs | ContextTool::QueryMetrics => return denied_result(call),
+            ContextTool::QueryLogs | ContextTool::QueryMetrics => Err(ContextError::InvalidPlan),
         };
         let mut result = match result {
             Ok(evidence_id) => ToolResult {
