@@ -3,6 +3,7 @@
 pub mod budget;
 pub mod contracts;
 pub mod coordinator;
+pub mod dispatcher;
 pub mod evidence;
 pub mod incident;
 pub mod investigation;

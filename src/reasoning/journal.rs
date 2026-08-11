@@ -4,6 +4,7 @@
 //! entries must produce the same timing, usage, provider-path, and cost view.
 
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 
 use super::coordinator::AttemptRecord;
 use super::router::ProviderKind;
@@ -98,6 +99,19 @@ impl IncidentJournal {
     /// Returns entries in sequence order for durable persistence or replay.
     pub fn entries(&self) -> &[JournalEntry] {
         &self.entries
+    }
+
+    /// Returns incident identities already represented in the journal.
+    pub fn incident_ids(&self) -> BTreeSet<String> {
+        self.entries
+            .iter()
+            .filter_map(|entry| match &entry.event {
+                JournalEvent::IncidentOpened { incident_id, .. }
+                | JournalEvent::AlertDeduplicated { incident_id }
+                | JournalEvent::IncidentRecovered { incident_id } => Some(incident_id.clone()),
+                _ => None,
+            })
+            .collect()
     }
 
     pub(crate) fn restore(&mut self, entry: JournalEntry) {

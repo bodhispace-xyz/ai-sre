@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+use tokio::sync::mpsc;
 
 use crate::reasoning::incident::{AlertmanagerWebhook, IncidentSignal, normalize_webhook};
 
@@ -51,6 +52,9 @@ pub enum IntakeError {
     /// The listener or connection failed.
     #[error("HTTP intake I/O failed")]
     Io,
+    /// No worker was available to accept the batch.
+    #[error("HTTP intake queue is unavailable")]
+    QueueUnavailable,
 }
 
 /// Bounded Alertmanager webhook listener.
@@ -98,17 +102,26 @@ impl AlertIntake {
     }
 
     /// Serves connections forever, acknowledging accepted batches only.
-    pub async fn serve(self, listener: TcpListener) -> Result<(), IntakeError> {
+    pub async fn serve(
+        self,
+        listener: TcpListener,
+        sender: mpsc::Sender<IntakeBatch>,
+    ) -> Result<(), IntakeError> {
         loop {
             let (stream, _) = listener.accept().await.map_err(|_| IntakeError::Io)?;
             let intake = self;
+            let sender = sender.clone();
             tokio::spawn(async move {
-                let _ = intake.handle(stream).await;
+                let _ = intake.handle(stream, &sender).await;
             });
         }
     }
 
-    async fn handle(&self, mut stream: TcpStream) -> Result<(), IntakeError> {
+    async fn handle(
+        &self,
+        mut stream: TcpStream,
+        sender: &mpsc::Sender<IntakeBatch>,
+    ) -> Result<(), IntakeError> {
         let mut request = vec![0_u8; self.config.max_body_bytes.saturating_add(16_384)];
         let size = stream
             .read(&mut request)
@@ -116,7 +129,12 @@ impl AlertIntake {
             .map_err(|_| IntakeError::Io)?;
         request.truncate(size);
         let response = match self.parse_request(&request) {
-            Ok(_) => "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            Ok(batch) => match sender.try_send(batch) {
+                Ok(()) => "HTTP/1.1 202 Accepted\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                Err(_) => {
+                    "HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                }
+            },
             Err(IntakeError::NotAllowed) => {
                 "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             }
@@ -127,6 +145,7 @@ impl AlertIntake {
                 "HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
             }
             Err(IntakeError::Io) => return Err(IntakeError::Io),
+            Err(IntakeError::QueueUnavailable) => return Err(IntakeError::QueueUnavailable),
         };
         stream
             .write_all(response.as_bytes())

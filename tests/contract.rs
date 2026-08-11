@@ -26,3 +26,6 @@ mod transport;
 
 #[path = "contract/config.rs"]
 mod config;
+
+#[path = "contract/dispatcher.rs"]
+mod dispatcher;
