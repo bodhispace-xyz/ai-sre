@@ -543,3 +543,114 @@ fn runtime_runs_recorded_fallback_from_openai_to_gemini() {
     assert_eq!(projection.provider_attempts, 2);
     assert_eq!(projection.terminal_provider, Some(ProviderKind::Gemini));
 }
+
+#[test]
+fn runtime_runs_full_three_provider_fallback_and_journals_terminal_deepseek() {
+    // Given an evidence board and failures from OpenAI and Gemini before DeepSeek succeeds.
+    let mut runtime = IncidentRuntime::new(ReasoningConfig::default()).expect("runtime config");
+    runtime
+        .commit_evidence(
+            EvidenceSource::GrafanaLogs,
+            "{app=\"api\"}",
+            b"log".to_vec(),
+            1,
+        )
+        .expect("evidence");
+    let report = r#"{"summary":"Database latency is elevated.","evidence":[{"evidence_id":"evidence-0001"}]}"#;
+    let mut providers = vec![
+        RecordedProvider::new(
+            ProviderKind::OpenAi,
+            [RecordedAttempt {
+                outcome: RecordedOutcome::Failure(FailureClass::TemporarilyUnavailable),
+                facts: AttemptFacts {
+                    elapsed_ms: 10,
+                    ..AttemptFacts::default()
+                },
+            }],
+        ),
+        RecordedProvider::new(
+            ProviderKind::Gemini,
+            [RecordedAttempt {
+                outcome: RecordedOutcome::Failure(FailureClass::RateLimited),
+                facts: AttemptFacts {
+                    elapsed_ms: 20,
+                    ..AttemptFacts::default()
+                },
+            }],
+        ),
+        RecordedProvider::new(
+            ProviderKind::DeepSeek,
+            [RecordedAttempt {
+                outcome: RecordedOutcome::Success(report.to_owned()),
+                facts: AttemptFacts {
+                    elapsed_ms: 30,
+                    tokens: Some(60),
+                    ..AttemptFacts::default()
+                },
+            }],
+        ),
+    ];
+
+    // When the shared incident budget admits exactly three provider attempts.
+    let result = runtime.run_recorded(
+        &mut providers,
+        Reservation {
+            provider_calls: 1,
+            tokens: 100,
+            evidence_queries: 1,
+            cost_micro_usd: 0,
+        },
+        10,
+    );
+
+    // Then DeepSeek is terminal and every complete run is journaled.
+    assert_eq!(result, Ok(RunStatus::Succeeded(ProviderKind::DeepSeek)));
+    let projection = runtime.journal().project();
+    assert_eq!(projection.provider_attempts, 3);
+    assert_eq!(projection.provider_time_ms, 60);
+    assert_eq!(projection.terminal_provider, Some(ProviderKind::DeepSeek));
+}
+
+#[test]
+fn runtime_stops_fallback_when_the_incident_call_budget_is_exhausted() {
+    // Given a two-call budget and three providers that all fail.
+    let config = ReasoningConfig {
+        budget: BudgetConfig {
+            max_provider_calls: 2,
+            ..BudgetConfig::default()
+        },
+        ..ReasoningConfig::default()
+    };
+    let mut runtime = IncidentRuntime::new(config).expect("runtime config");
+    let failure = || RecordedAttempt {
+        outcome: RecordedOutcome::Failure(FailureClass::TemporarilyUnavailable),
+        facts: AttemptFacts::default(),
+    };
+    let mut providers = vec![
+        RecordedProvider::new(ProviderKind::OpenAi, [failure()]),
+        RecordedProvider::new(ProviderKind::Gemini, [failure()]),
+        RecordedProvider::new(ProviderKind::DeepSeek, [failure()]),
+    ];
+
+    // When the third admission would exceed the shared incident budget.
+    let result = runtime.run_recorded(
+        &mut providers,
+        Reservation {
+            provider_calls: 1,
+            tokens: 10,
+            evidence_queries: 0,
+            cost_micro_usd: 0,
+        },
+        0,
+    );
+
+    // Then the runtime fails closed after two journaled attempts.
+    assert_eq!(
+        result,
+        Err(ai_sre::reasoning::runtime::RuntimeError::Coordination(
+            CoordinatorError::Budget(BudgetError::ProviderCalls)
+        ))
+    );
+    assert_eq!(runtime.journal().project().provider_attempts, 2);
+    assert_eq!(runtime.journal().project().terminal_provider, None);
+}
