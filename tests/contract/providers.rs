@@ -13,6 +13,7 @@ use ai_sre::reasoning::coordinator::{
 };
 use ai_sre::reasoning::evidence::{EvidenceBoard, EvidenceError, EvidenceSource};
 use ai_sre::reasoning::journal::{IncidentJournal, JournalEvent, Phase, attempt_event};
+use ai_sre::reasoning::recorded::{RecordedAttempt, RecordedOutcome, RecordedProvider};
 use ai_sre::reasoning::router::{ProviderKind, ProviderOrder, next_provider, next_provider_in};
 use ai_sre::reasoning::runtime::IncidentRuntime;
 
@@ -460,4 +461,33 @@ fn incident_runtime_emits_evidence_attempt_and_terminal_journal_facts() {
     assert_eq!(runtime.evidence().records().len(), 1);
     assert_eq!(runtime.journal().entries().len(), 5);
     assert_eq!(runtime.journal().project().unknown_cost_attempts, 1);
+}
+
+#[test]
+fn recorded_provider_replays_fallback_outcomes_without_network_access() {
+    // Given a scripted OpenAI failure followed by a successful Gemini result.
+    let mut provider = RecordedProvider::new(
+        ProviderKind::OpenAi,
+        [RecordedAttempt {
+            outcome: RecordedOutcome::Failure(FailureClass::TemporarilyUnavailable),
+            facts: AttemptFacts {
+                elapsed_ms: 50,
+                tokens: Some(12),
+                evidence_queries: 1,
+                cost_micro_usd: None,
+            },
+        }],
+    );
+
+    // When the harness is consumed by the application test.
+    let attempt = provider.take_next().expect("recorded attempt");
+
+    // Then the outcome and accounting facts are exactly reproducible.
+    assert_eq!(provider.provider(), ProviderKind::OpenAi);
+    assert_eq!(
+        attempt.outcome,
+        RecordedOutcome::Failure(FailureClass::TemporarilyUnavailable)
+    );
+    assert_eq!(attempt.facts.elapsed_ms, 50);
+    assert!(provider.take_next().is_none());
 }
