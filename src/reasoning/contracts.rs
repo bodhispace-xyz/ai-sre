@@ -4,12 +4,13 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct EvidenceRef {
     pub evidence_id: String,
-    pub claim: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DiagnosticReport {
     pub summary: String,
     pub evidence: Vec<EvidenceRef>,
@@ -21,6 +22,8 @@ pub enum ContractError {
     UnknownEvidence(String),
     #[error("diagnostic report must contain a non-empty summary")]
     EmptySummary,
+    #[error("diagnostic report must cite at least one evidence item")]
+    MissingEvidence,
 }
 
 impl DiagnosticReport {
@@ -31,6 +34,10 @@ impl DiagnosticReport {
     ) -> Result<(), ContractError> {
         if self.summary.trim().is_empty() {
             return Err(ContractError::EmptySummary);
+        }
+
+        if self.evidence.is_empty() {
+            return Err(ContractError::MissingEvidence);
         }
 
         self.evidence

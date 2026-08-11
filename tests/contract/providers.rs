@@ -9,7 +9,6 @@ fn diagnostic_report_accepts_only_citations_from_the_evidence_board() {
         summary: "The API is returning elevated 5xx responses.".to_owned(),
         evidence: vec![EvidenceRef {
             evidence_id: "metrics-001".to_owned(),
-            claim: "5xx rate increased over the incident window".to_owned(),
         }],
     };
 
@@ -23,7 +22,6 @@ fn diagnostic_report_rejects_a_citation_not_on_the_evidence_board() {
         summary: "The API is returning elevated 5xx responses.".to_owned(),
         evidence: vec![EvidenceRef {
             evidence_id: "invented-001".to_owned(),
-            claim: "an unsupported claim".to_owned(),
         }],
     };
 
@@ -44,4 +42,27 @@ fn diagnostic_report_rejects_an_empty_summary() {
         report.validate_against(&BTreeSet::new()),
         Err(ContractError::EmptySummary)
     );
+}
+
+#[test]
+fn diagnostic_report_rejects_missing_evidence() {
+    let report = DiagnosticReport {
+        summary: "The API is returning elevated 5xx responses.".to_owned(),
+        evidence: Vec::new(),
+    };
+
+    assert_eq!(
+        report.validate_against(&BTreeSet::new()),
+        Err(ContractError::MissingEvidence)
+    );
+}
+
+#[test]
+fn provider_json_rejects_unknown_fields() {
+    let json = r#"{
+        "summary": "The API is returning elevated 5xx responses.",
+        "evidence": [{"evidence_id": "metrics-001", "claim": "invented"}]
+    }"#;
+
+    assert!(serde_json::from_str::<DiagnosticReport>(json).is_err());
 }
