@@ -129,4 +129,9 @@ impl BudgetState {
             self.reserved_cost_micro_usd,
         )
     }
+
+    /// Returns the configured evidence-query ceiling.
+    pub const fn max_evidence_queries(&self) -> u32 {
+        self.config.max_evidence_queries
+    }
 }

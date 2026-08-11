@@ -113,17 +113,27 @@ impl GcxRunner {
         let max_output_bytes = self.max_output_bytes;
 
         time::timeout(self.timeout, async move {
-            let (stdout, stderr) = tokio::join!(
-                read_bounded(stdout, max_output_bytes),
-                read_bounded(stderr, max_output_bytes)
-            );
-
+            let stdout_task = tokio::spawn(read_bounded(stdout, max_output_bytes));
+            let stderr_task = tokio::spawn(read_bounded(stderr, max_output_bytes));
+            let (stdout, stderr) = tokio::try_join!(stdout_task, stderr_task)
+                .map_err(|_| GcxRunError::OutputReadFailed)?;
+            let stdout = match stdout {
+                Ok(value) => value,
+                Err(error) => {
+                    let _ = child.kill().await;
+                    let _ = child.wait().await;
+                    return Err(error);
+                }
+            };
+            if let Err(error) = stderr {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Err(error);
+            }
             let status = child
                 .wait()
                 .await
                 .map_err(|_| GcxRunError::OutputReadFailed)?;
-            let stdout = stdout?;
-            stderr?;
 
             if !status.success() {
                 return Err(GcxRunError::NonZeroExit(status.code().unwrap_or(-1)));
@@ -226,7 +236,7 @@ impl GcxQuery {
 
     /// Validates model-authored query data before process execution.
     pub fn validate(&self, max_expression_bytes: usize) -> Result<(), GcxRunError> {
-        let (expression, datasource) = match self {
+        let (expression, datasource, kind) = match self {
             Self::Logs {
                 expression,
                 datasource,
@@ -234,7 +244,7 @@ impl GcxQuery {
             | Self::Metrics {
                 expression,
                 datasource,
-            } => (expression, datasource),
+            } => (expression, datasource, self.kind()),
         };
         if expression.is_empty()
             || expression.len() > max_expression_bytes
@@ -246,11 +256,19 @@ impl GcxQuery {
             || expression.contains('\0')
             || expression
                 .chars()
-                .any(|character| matches!(character, '\n' | '\r' | ';' | '`'))
-            || expression.contains("$(")
-            || expression.contains("&&")
-            || expression.contains("||")
+                .any(|character| matches!(character, '\n' | '\r'))
         {
+            return Err(GcxRunError::InvalidQuery);
+        }
+        let invalid_semantics = match kind {
+            QueryKind::Logs => {
+                !expression.contains('{') || !expression.contains('}') || expression.contains("{}")
+            }
+            QueryKind::Metrics => {
+                expression.contains("{}") || expression.contains("=~\".*\"") || expression == "*"
+            }
+        };
+        if invalid_semantics {
             return Err(GcxRunError::InvalidQuery);
         }
         Ok(())

@@ -14,7 +14,7 @@ use std::{
 use rig_core::client::ProviderClient;
 use rig_core::{
     client::CompletionClient,
-    completion::{AssistantContent, CompletionModel},
+    completion::{AssistantContent, CompletionModel, ToolDefinition},
 };
 
 use crate::reasoning::live::{LiveCompletion, LiveProvider};
@@ -266,7 +266,19 @@ pub async fn complete_with_rig(
 ) -> Result<(DiagnosticReport, Option<u64>), FailureClass> {
     let client = rig_client(access_token).map_err(|_| FailureClass::TemporarilyUnavailable)?;
     let model = client.completion_model(rig_core::providers::chatgpt::GPT_5_4);
-    let request = model.completion_request(prompt).build();
+    let request = model
+        .completion_request(prompt)
+        .tool(ToolDefinition {
+            name: "query_logs".to_owned(),
+            description: "Read bounded Loki logs through the approved gcx adapter.".to_owned(),
+            parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}),
+        })
+        .tool(ToolDefinition {
+            name: "query_metrics".to_owned(),
+            description: "Read bounded Prometheus metrics through the approved gcx adapter.".to_owned(),
+            parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}),
+        })
+        .build();
     let response = model
         .completion(request)
         .await

@@ -75,6 +75,22 @@ impl IncidentRuntime {
         Ok(evidence_id)
     }
 
+    /// Reserves one read-only context query against the incident budget.
+    pub fn reserve_evidence_query(&mut self) -> Result<(), RuntimeError> {
+        self.run.reserve_evidence_query()?;
+        Ok(())
+    }
+
+    /// Returns the configured per-incident evidence-query ceiling.
+    pub const fn max_evidence_queries(&self) -> u32 {
+        self.run.max_evidence_queries()
+    }
+
+    /// Returns current reserved budget totals for prompt and journal context.
+    pub fn budget_totals(&self) -> (u32, u64, u32, u64) {
+        self.run.budget_totals()
+    }
+
     /// Starts the reasoning phase and admits one provider after reservation.
     pub fn admit_provider(
         &mut self,

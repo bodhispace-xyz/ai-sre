@@ -52,7 +52,9 @@ pub fn build(config: AppConfig) -> Result<Application, BootstrapError> {
             config.gcx_binary,
             Duration::from_secs(config.gcx_timeout_secs),
             config.gcx_max_output_bytes,
-        ),
+        )
+        .with_max_query_bytes(config.gcx_max_query_bytes)
+        .with_max_concurrency(config.gcx_max_concurrency),
         GrafanaContextConfig {
             logs_datasource: config.grafana.logs_datasource,
             metrics_datasource: config.grafana.metrics_datasource,

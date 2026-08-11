@@ -144,6 +144,16 @@ impl ReasoningRun {
         Ok(Some(provider))
     }
 
+    /// Reserves one model-directed read-only evidence query.
+    pub fn reserve_evidence_query(&mut self) -> Result<(), CoordinatorError> {
+        Ok(self.budget.reserve(Reservation {
+            provider_calls: 0,
+            tokens: 0,
+            evidence_queries: 1,
+            cost_micro_usd: 0,
+        })?)
+    }
+
     /// Returns the next provider without consuming any budget.
     pub fn next_provider(&self) -> Option<ProviderKind> {
         if self.status.is_some() || self.active.is_some() {
@@ -223,6 +233,11 @@ impl ReasoningRun {
     /// Returns immutable accounting facts for the incident journal.
     pub fn budget_totals(&self) -> (u32, u64, u32, u64) {
         self.budget.totals()
+    }
+
+    /// Returns the configured per-incident evidence-query ceiling.
+    pub const fn max_evidence_queries(&self) -> u32 {
+        self.budget.max_evidence_queries()
     }
 
     /// Returns the terminal status, if the run has stopped.

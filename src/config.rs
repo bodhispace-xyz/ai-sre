@@ -29,6 +29,10 @@ pub struct AppConfig {
     pub gcx_timeout_secs: u64,
     /// Maximum stdout/stderr bytes accepted from `gcx`.
     pub gcx_max_output_bytes: usize,
+    /// Maximum UTF-8 query expression bytes accepted by policy.
+    pub gcx_max_query_bytes: usize,
+    /// Maximum concurrent read-only `gcx` processes.
+    pub gcx_max_concurrency: usize,
 }
 
 impl Default for AppConfig {
@@ -40,6 +44,8 @@ impl Default for AppConfig {
             gcx_binary: PathBuf::from("/usr/local/bin/gcx"),
             gcx_timeout_secs: 30,
             gcx_max_output_bytes: 1_048_576,
+            gcx_max_query_bytes: 4_096,
+            gcx_max_concurrency: 4,
         }
     }
 }
@@ -113,7 +119,11 @@ impl AppConfig {
         {
             return Err(ConfigError::EmptyValue);
         }
-        if self.gcx_timeout_secs == 0 || self.gcx_max_output_bytes == 0 {
+        if self.gcx_timeout_secs == 0
+            || self.gcx_max_output_bytes == 0
+            || self.gcx_max_query_bytes == 0
+            || self.gcx_max_concurrency == 0
+        {
             return Err(ConfigError::ZeroLimit);
         }
         self.reasoning

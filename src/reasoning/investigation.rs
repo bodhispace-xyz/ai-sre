@@ -17,7 +17,7 @@ use super::{
     budget::Reservation,
     incident::IncidentSignal,
     journal::{JournalContext, JournalEvent, Phase},
-    live::{LiveProviders, run_live},
+    live::{LiveProviders, run_live_with_alert_name},
     recorded::RecordedProvider,
     router::ProviderKind,
     runtime::{IncidentRuntime, RuntimeError},
@@ -112,22 +112,35 @@ pub async fn investigate_live(
         Some(&context),
     )?;
     let mut collected = super::evidence::EvidenceBoard::default();
-    let mut context_budget = ContextBudget::new(2);
+    let mut context_budget = ContextBudget::new(runtime.max_evidence_queries() as usize);
     let remaining = runtime.remaining().ok_or(InvestigationError::Deadline)?;
-    timeout(
-        remaining,
-        grafana.execute_requests(
-            &mut collected,
-            &mut context_budget,
-            &[
-                ReadOnlyRequest::Logs(queries.logs),
-                ReadOnlyRequest::Metrics(queries.metrics),
-            ],
-        ),
-    )
-    .await
-    .map_err(|_| InvestigationError::Deadline)??;
-    for record in collected.records() {
+    let requests = [
+        ReadOnlyRequest::Logs(queries.logs),
+        ReadOnlyRequest::Metrics(queries.metrics),
+    ];
+    for request in requests {
+        let result = timeout(remaining, async {
+            match request {
+                ReadOnlyRequest::Logs(expression) => {
+                    grafana
+                        .logs_with_budget(&mut collected, &mut context_budget, expression)
+                        .await
+                }
+                ReadOnlyRequest::Metrics(expression) => {
+                    grafana
+                        .metrics_with_budget(&mut collected, &mut context_budget, expression)
+                        .await
+                }
+            }
+        })
+        .await
+        .map_err(|_| InvestigationError::Deadline)??;
+        let record = collected
+            .records()
+            .iter()
+            .find(|record| record.evidence_id == result)
+            .expect("context query commits its evidence");
+        runtime.reserve_evidence_query()?;
         runtime.commit_evidence(
             record.source,
             record.query.clone(),
@@ -143,7 +156,15 @@ pub async fn investigate_live(
         Some(&context),
     )?;
     let prompt = build_prompt(signal, runtime);
-    let status = run_live(runtime, providers, &prompt, reservation, start_at_ms).await?;
+    let status = run_live_with_alert_name(
+        runtime,
+        providers,
+        &prompt,
+        &signal.alert_name,
+        reservation,
+        start_at_ms,
+    )
+    .await?;
     for entry in runtime.journal().entries() {
         journal.append_scoped(entry.event.clone(), Some(&context))?;
     }
@@ -168,8 +189,12 @@ pub async fn investigate_live(
 
 fn build_prompt(signal: &IncidentSignal, runtime: &IncidentRuntime) -> String {
     let mut prompt = format!(
-        "Diagnose incident {} (alert {}). Return strict JSON with summary and evidence citations.\n",
-        signal.incident_id, signal.alert_name
+        "Diagnose incident {} (alert {}). Return strict JSON with summary and evidence citations.\nTools available: query_logs(query), query_metrics(query). These are read-only, bounded, and datasource-owned.\nRemaining configured evidence-query ceiling: {}. Do not execute commands, write Grafana state, or request credentials.\n",
+        signal.incident_id,
+        signal.alert_name,
+        runtime
+            .max_evidence_queries()
+            .saturating_sub(runtime.budget_totals().2)
     );
     for record in runtime.evidence().records() {
         let payload = redact_text(&String::from_utf8_lossy(&record.payload));

@@ -45,6 +45,26 @@ pub async fn run_live(
     reservation: Reservation,
     start_at_ms: u64,
 ) -> Result<RunStatus, RuntimeError> {
+    run_live_with_alert_name(
+        runtime,
+        providers,
+        prompt,
+        "incident",
+        reservation,
+        start_at_ms,
+    )
+    .await
+}
+
+/// Executes live providers while preserving the incident alert name for the baseline.
+pub async fn run_live_with_alert_name(
+    runtime: &mut IncidentRuntime,
+    providers: LiveProviders<'_>,
+    prompt: &str,
+    alert_name: &str,
+    reservation: Reservation,
+    start_at_ms: u64,
+) -> Result<RunStatus, RuntimeError> {
     // Evidence is collected once before provider fallback; do not charge it
     // repeatedly to every model attempt.
     let evidence_queries = 0;
@@ -82,7 +102,7 @@ pub async fn run_live(
                         None => Err(FailureClass::TemporarilyUnavailable),
                     },
                     ProviderKind::Deterministic => {
-                        Ok((build_report("incident", &evidence_ids), None))
+                        Ok((build_report(alert_name, &evidence_ids), None))
                     }
                 }
             })
