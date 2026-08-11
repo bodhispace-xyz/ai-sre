@@ -4,7 +4,7 @@
 //! before JSON parsing, normalizes only the documented webhook route, and
 //! waits for the journal-owning worker to confirm durable admission.
 
-use std::fmt;
+use std::{fmt, time::Duration};
 
 use axum::{
     Router,
@@ -21,10 +21,14 @@ use tokio::{
 };
 
 use crate::observability::MetricsSnapshot;
-use crate::reasoning::incident::{AlertmanagerWebhook, IncidentSignal, normalize_webhook};
+use crate::reasoning::incident::{
+    AlertmanagerWebhook, IncidentSignal, normalize_webhook, validate_webhook,
+};
 
 /// The only HTTP route exposed by this intake.
 pub const ALERTMANAGER_PATH: &str = "/webhooks/alertmanager";
+/// Maximum time the HTTP boundary waits for durable worker admission.
+pub const INTAKE_ACK_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Bounded request settings for the intake listener.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,7 +142,10 @@ impl AlertIntake {
         next: Option<impl Into<String>>,
     ) -> Self {
         self.current_token = Some(SecretToken(current.into()));
-        self.next_token = next.map(|token| SecretToken(token.into()));
+        self.next_token = next
+            .map(Into::into)
+            .filter(|token: &String| !token.is_empty())
+            .map(SecretToken);
         self
     }
 
@@ -231,16 +238,19 @@ async fn handle_webhook(
         }
         let batch = parse_body(&body)?;
         let (acknowledged, response) = oneshot::channel();
-        state
-            .sender
-            .send(IntakeCommand {
+        tokio::time::timeout(
+            INTAKE_ACK_TIMEOUT,
+            state.sender.send(IntakeCommand {
                 batch,
                 acknowledged,
-            })
+            }),
+        )
+        .await
+        .map_err(|_| IntakeError::QueueUnavailable)?
+        .map_err(|_| IntakeError::QueueUnavailable)?;
+        tokio::time::timeout(INTAKE_ACK_TIMEOUT, response)
             .await
-            .map_err(|_| IntakeError::QueueUnavailable)?;
-        response
-            .await
+            .map_err(|_| IntakeError::QueueUnavailable)?
             .map_err(|_| IntakeError::QueueUnavailable)?
             .map_err(|_| IntakeError::QueueUnavailable)?;
         Ok::<_, IntakeError>(())
@@ -271,6 +281,9 @@ fn response_with_close(status: StatusCode) -> Response {
 fn parse_body(body: &[u8]) -> Result<IntakeBatch, IntakeError> {
     let webhook: AlertmanagerWebhook =
         serde_json::from_slice(body).map_err(|_| IntakeError::Malformed)?;
+    if !validate_webhook(&webhook) {
+        return Err(IntakeError::Malformed);
+    }
     Ok(IntakeBatch {
         incidents: normalize_webhook(webhook),
     })
@@ -280,6 +293,9 @@ fn authenticate(intake: &AlertIntake, headers: &HeaderMap) -> Result<(), IntakeE
     let Some(current) = &intake.current_token else {
         return Ok(());
     };
+    if current.0.is_empty() {
+        return Err(IntakeError::Unauthorized);
+    }
     let Some(value) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())

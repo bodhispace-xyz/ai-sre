@@ -32,16 +32,52 @@ pub enum JournalEvent {
         incident_id: String,
         /// Normalized alert name.
         alert_name: String,
+        /// Labels required to reconstruct a pending shadow investigation.
+        #[serde(default)]
+        labels: std::collections::BTreeMap<String, String>,
+        /// Annotations retained for the pending investigation context.
+        #[serde(default)]
+        annotations: std::collections::BTreeMap<String, String>,
+        /// Source event time used for stale-event ordering.
+        #[serde(default)]
+        event_time: String,
+        /// Canonical source event identity.
+        #[serde(default)]
+        source_event_id: String,
     },
     /// Records a duplicate signal without starting another workflow.
     AlertDeduplicated {
         /// Existing incident identity.
         incident_id: String,
+        /// Source event time used for exact replay identity.
+        #[serde(default)]
+        event_time: String,
+        /// Canonical source event identity.
+        #[serde(default)]
+        source_event_id: String,
+    },
+    /// Records an older lifecycle event without allowing state regression.
+    AlertOutOfOrder {
+        /// Incident identity from the stale source event.
+        incident_id: String,
+        /// Lifecycle status carried by the stale event.
+        status: super::incident::AlertStatus,
+        /// Source event time that was rejected for ordering.
+        event_time: String,
+        /// Canonical source event identity.
+        #[serde(default)]
+        source_event_id: String,
     },
     /// Records recovery for an existing incident.
     IncidentRecovered {
         /// Stable incident identity.
         incident_id: String,
+        /// Source event time used for stale-event ordering.
+        #[serde(default)]
+        event_time: String,
+        /// Canonical source event identity.
+        #[serde(default)]
+        source_event_id: String,
     },
     /// Records that the incident workflow reached a terminal report state.
     IncidentCompleted {
@@ -52,6 +88,12 @@ pub enum JournalEvent {
     IncidentResumed {
         /// Stable incident episode identity.
         incident_id: String,
+        /// Source event time that caused the resume.
+        #[serde(default)]
+        event_time: String,
+        /// Canonical source event identity.
+        #[serde(default)]
+        source_event_id: String,
     },
     /// Records an evidence-board commit without storing credentials.
     EvidenceCommitted {
@@ -197,8 +239,9 @@ impl IncidentJournal {
             .iter()
             .filter_map(|entry| match &entry.event {
                 JournalEvent::IncidentOpened { incident_id, .. }
-                | JournalEvent::AlertDeduplicated { incident_id }
-                | JournalEvent::IncidentRecovered { incident_id } => Some(incident_id.clone()),
+                | JournalEvent::AlertDeduplicated { incident_id, .. }
+                | JournalEvent::AlertOutOfOrder { incident_id, .. }
+                | JournalEvent::IncidentRecovered { incident_id, .. } => Some(incident_id.clone()),
                 _ => None,
             })
             .collect()
@@ -233,6 +276,7 @@ impl IncidentJournal {
             match &entry.event {
                 JournalEvent::IncidentOpened { .. }
                 | JournalEvent::AlertDeduplicated { .. }
+                | JournalEvent::AlertOutOfOrder { .. }
                 | JournalEvent::IncidentRecovered { .. }
                 | JournalEvent::IncidentCompleted { .. }
                 | JournalEvent::IncidentResumed { .. }

@@ -109,8 +109,27 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
         worker_metrics
             .replace_from(dispatcher.journal().journal())
             .await;
-        while let Some(command) = receiver.recv().await {
-            let incidents = match dispatcher.process_new(command.batch) {
+        let pending = dispatcher.pending_investigations();
+        let mut startup_command = (!pending.is_empty()).then(|| {
+            let (acknowledged, _ignored_ack) = oneshot::channel();
+            IntakeCommand {
+                batch: crate::transport::IntakeBatch { incidents: pending },
+                acknowledged,
+            }
+        });
+        'worker: loop {
+            let startup = startup_command.is_some();
+            let Some(command) = (match startup_command.take() {
+                Some(command) => Some(command),
+                None => receiver.recv().await,
+            }) else {
+                break;
+            };
+            let incidents = match if startup {
+                Ok(command.batch.incidents)
+            } else {
+                dispatcher.process_new(command.batch)
+            } {
                 Ok(incidents) => {
                     let _ = command.acknowledged.send(Ok(()));
                     incidents
@@ -192,6 +211,8 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
                         .reconcile_cost(&run_id, actual_cost)
                     {
                         eprintln!("cost reservation reconciliation failed: {error}");
+                        let _ = worker_failed.send(());
+                        break 'worker;
                     }
                 }
                 if result.is_ok() {
@@ -203,6 +224,8 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
                         dispatcher.mark_completed_with_outbox(&incident.incident_id, outbox)
                     {
                         eprintln!("incident completion journal failed: {error}");
+                        let _ = worker_failed.send(());
+                        break 'worker;
                     }
                 }
                 drain_outbox(&mut dispatcher, ntfy.as_ref()).await;
@@ -220,8 +243,16 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
         .with_bearer_tokens(intake_token, intake_next_token)
         .serve_with_metrics(listener, sender, metrics);
     tokio::pin!(intake);
+    tokio::pin!(worker);
     tokio::select! {
-        result = &mut intake => result.map_err(ApplicationError::from),
+        result = &mut intake => {
+            worker.abort();
+            result.map_err(ApplicationError::from)
+        },
+        result = &mut worker => {
+            eprintln!("incident worker exited unexpectedly: {result:?}");
+            Err(ApplicationError::WorkerFailed)
+        },
         _ = worker_failed_rx => {
             worker.abort();
             Err(ApplicationError::WorkerFailed)
