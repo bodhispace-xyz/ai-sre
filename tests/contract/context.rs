@@ -116,6 +116,7 @@ fn provider_names_map_to_the_read_only_context_capabilities() {
     let desired = parse_tool_call("d", "read_desired_state", r#"{"query":"HEAD\napi.yml"}"#);
     let history = parse_tool_call("h", "read_deployment_history", r#"{"query":"api.yml"}"#);
     let health = parse_tool_call("c", "read_health", r#"{"query":"api"}"#);
+    let discover = parse_tool_call("o", "discover_observability", r#"{"query":"overview"}"#);
 
     // When provider metadata crosses the strict tool parser.
     // Then each name maps to an allowlisted capability with no command fields.
@@ -128,6 +129,10 @@ fn provider_names_map_to_the_read_only_context_capabilities() {
         ContextTool::ReadDeploymentHistory
     );
     assert_eq!(health.expect("health").tool, ContextTool::ReadHealth);
+    assert_eq!(
+        discover.expect("discover").tool,
+        ContextTool::DiscoverObservability
+    );
 }
 
 #[tokio::test]

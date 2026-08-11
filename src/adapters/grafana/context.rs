@@ -133,7 +133,8 @@ impl GrafanaContext {
             }
             ContextTool::ReadDesiredState
             | ContextTool::ReadDeploymentHistory
-            | ContextTool::ReadHealth => Err(ContextError::UnsupportedTool),
+            | ContextTool::ReadHealth
+            | ContextTool::DiscoverObservability => Err(ContextError::UnsupportedTool),
         };
         let mut result = match result {
             Ok(evidence_id) => ToolResult {
@@ -179,7 +180,8 @@ impl GrafanaContext {
                 ContextTool::QueryMetrics => EvidenceSource::GrafanaMetrics,
                 ContextTool::ReadDesiredState
                 | ContextTool::ReadDeploymentHistory
-                | ContextTool::ReadHealth => EvidenceSource::Health,
+                | ContextTool::ReadHealth
+                | ContextTool::DiscoverObservability => EvidenceSource::ObservabilityMetadata,
             };
             result.evidence_id = board
                 .commit_with_metadata(

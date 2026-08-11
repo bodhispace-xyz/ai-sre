@@ -29,6 +29,8 @@ pub enum ContextTool {
     ReadDeploymentHistory,
     /// Read one server-owned health alias.
     ReadHealth,
+    /// Discover bounded server-owned observability capabilities.
+    DiscoverObservability,
 }
 
 /// A validated request extracted from a provider response.
@@ -58,6 +60,7 @@ pub fn parse_tool_call(
         "read_desired_state" => ContextTool::ReadDesiredState,
         "read_deployment_history" => ContextTool::ReadDeploymentHistory,
         "read_health" => ContextTool::ReadHealth,
+        "discover_observability" => ContextTool::DiscoverObservability,
         _ => return Err(ToolLoopError::UnknownTool),
     };
     let query = serde_json::from_str::<ToolArguments>(arguments)
@@ -251,6 +254,7 @@ mod tests {
             ContextTool::ReadDesiredState,
             ContextTool::ReadDeploymentHistory,
             ContextTool::ReadHealth,
+            ContextTool::DiscoverObservability,
         ];
 
         // When each capability is classified.
@@ -262,6 +266,7 @@ mod tests {
                     | ContextTool::ReadDesiredState
                     | ContextTool::ReadDeploymentHistory
                     | ContextTool::ReadHealth
+                    | ContextTool::DiscoverObservability
             )
         });
 

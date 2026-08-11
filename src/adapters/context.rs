@@ -264,6 +264,34 @@ impl ReadOnlyContext {
         self.runner.execute(board, &plan).await
     }
 
+    fn discover(&self, board: &mut EvidenceBoard) -> Result<String, ContextError> {
+        let aliases = self
+            .config
+            .health_commands
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>();
+        let payload = serde_json::json!({
+            "capabilities": [
+                "discover_observability", "query_logs", "query_metrics",
+                "read_desired_state", "read_deployment_history", "read_health"
+            ],
+            "health_aliases": aliases,
+            "query_limits": {
+                "max_output_bytes": MAX_OUTPUT_BYTES,
+                "max_history_entries": MAX_HISTORY_ENTRIES
+            }
+        });
+        let payload = serde_json::to_vec(&payload).map_err(|_| ContextError::InvalidPlan)?;
+        board
+            .commit(
+                EvidenceSource::ObservabilityMetadata,
+                "observability capabilities",
+                payload,
+            )
+            .map_err(ContextError::Evidence)
+    }
+
     /// Executes one Git or health tool call using only server-owned selectors.
     pub async fn execute_tool(&self, board: &mut EvidenceBoard, call: &ToolCall) -> ToolResult {
         let source = match call.tool {
@@ -271,6 +299,7 @@ impl ReadOnlyContext {
             ContextTool::ReadDeploymentHistory => EvidenceSource::DeploymentHistory,
             ContextTool::ReadHealth => EvidenceSource::Health,
             ContextTool::QueryLogs | ContextTool::QueryMetrics => EvidenceSource::Health,
+            ContextTool::DiscoverObservability => EvidenceSource::ObservabilityMetadata,
         };
         let result = match call.tool {
             ContextTool::ReadDesiredState => {
@@ -283,6 +312,7 @@ impl ReadOnlyContext {
                 self.deployment_history(board, &call.query, 20).await
             }
             ContextTool::ReadHealth => self.health(board, call.query.trim()).await,
+            ContextTool::DiscoverObservability => self.discover(board),
             ContextTool::QueryLogs | ContextTool::QueryMetrics => return denied_result(call),
         };
         let mut result = match result {

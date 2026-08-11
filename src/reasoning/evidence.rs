@@ -26,6 +26,8 @@ pub enum EvidenceSource {
     DeploymentHistory,
     /// Read-only health snapshot from a server-owned health adapter.
     Health,
+    /// Server-owned list of available read-only observability capabilities.
+    ObservabilityMetadata,
 }
 
 /// Outcome metadata retained alongside every immutable evidence envelope.

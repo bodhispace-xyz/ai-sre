@@ -156,7 +156,8 @@ async fn execute_model_tool(
             }
             super::tools::ContextTool::ReadDesiredState
             | super::tools::ContextTool::ReadDeploymentHistory
-            | super::tools::ContextTool::ReadHealth => {
+            | super::tools::ContextTool::ReadHealth
+            | super::tools::ContextTool::DiscoverObservability => {
                 if let Some(adapter) = context.read_only {
                     adapter.execute_tool(context.board, call).await
                 } else {
@@ -645,6 +646,7 @@ fn tool_name(tool: &super::tools::ContextTool) -> &'static str {
         super::tools::ContextTool::ReadDesiredState => "read_desired_state",
         super::tools::ContextTool::ReadDeploymentHistory => "read_deployment_history",
         super::tools::ContextTool::ReadHealth => "read_health",
+        super::tools::ContextTool::DiscoverObservability => "discover_observability",
     }
 }
 
@@ -677,7 +679,7 @@ async fn provider_turn<'a>(
 
 fn build_prompt(signal: &IncidentSignal, runtime: &IncidentRuntime) -> String {
     let mut prompt = format!(
-        "Diagnose incident {} (alert {}). Return strict JSON with summary and evidence citations.\nTools available: query_logs(query), query_metrics(query), read_desired_state(query), read_deployment_history(query), read_health(query). These are read-only, bounded, and server-policy-owned.\nRemaining configured evidence-query ceiling: {}. Do not execute commands, write state, or request credentials.\n",
+        "Diagnose incident {} (alert {}). Return strict JSON with summary and evidence citations.\nTools available: discover_observability(query), query_logs(query), query_metrics(query), read_desired_state(query), read_deployment_history(query), read_health(query). These are read-only, bounded, and server-policy-owned.\nRemaining configured evidence-query ceiling: {}. Do not execute commands, write state, or request credentials.\n",
         signal.incident_id,
         signal.alert_name,
         runtime

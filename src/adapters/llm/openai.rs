@@ -289,6 +289,11 @@ pub async fn complete_with_rig(
             parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}),
         })
         .tool(ToolDefinition {
+            name: "discover_observability".to_owned(),
+            description: "List the fixed read-only observability capabilities available to this incident.".to_owned(),
+            parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}),
+        })
+        .tool(ToolDefinition {
             name: "read_desired_state".to_owned(),
             description: "Read one bounded desired-state file from the approved Git repository. Query format: revision\\nrelative_path.".to_owned(),
             parameters: serde_json::json!({"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}),
