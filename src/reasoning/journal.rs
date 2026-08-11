@@ -4,7 +4,10 @@
 //! entries must produce the same timing, usage, provider-path, and cost view.
 
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
+use std::{
+    collections::{BTreeSet, hash_map::DefaultHasher},
+    hash::{Hash, Hasher},
+};
 
 use super::coordinator::AttemptRecord;
 use super::router::ProviderKind;
@@ -77,11 +80,55 @@ pub enum JournalEvent {
     },
     /// Stores one complete provider-attempt result.
     ProviderAttempt(AttemptRecord),
+    /// Stores one bounded model-directed context request and its result.
+    ToolContext {
+        /// Provider that requested the context capability.
+        provider: ProviderKind,
+        /// Allowlisted capability name, never a raw command.
+        tool: String,
+        /// Stable non-secret digest of the query expression.
+        query_digest: String,
+        /// Safe result classification from the context adapter.
+        result_class: super::tools::ToolResultClass,
+        /// Monotonic elapsed time for the context call.
+        elapsed_ms: u64,
+        /// Bounded bytes committed or returned by the adapter.
+        output_bytes: u64,
+        /// Reserved query count before this call.
+        evidence_queries_before: u32,
+        /// Reserved query count after this call.
+        evidence_queries_after: u32,
+        /// Monotonic timestamp relative to the incident epoch.
+        at_ms: u64,
+    },
     /// Stores the terminal provider outcome.
     Terminal {
         /// Provider that produced the terminal report, if any.
         provider: Option<ProviderKind>,
     },
+}
+
+/// Bounded facts captured for one model-directed context call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ToolContextFacts {
+    /// Provider that requested the context capability.
+    pub provider: ProviderKind,
+    /// Allowlisted capability name, never a raw command.
+    pub tool: String,
+    /// Stable non-secret digest of the query expression.
+    pub query_digest: String,
+    /// Safe result classification from the context adapter.
+    pub result_class: super::tools::ToolResultClass,
+    /// Monotonic elapsed time for the context call.
+    pub elapsed_ms: u64,
+    /// Bounded bytes committed or returned by the adapter.
+    pub output_bytes: u64,
+    /// Reserved query count before this call.
+    pub evidence_queries_before: u32,
+    /// Reserved query count after this call.
+    pub evidence_queries_after: u32,
+    /// Monotonic timestamp relative to the incident epoch.
+    pub at_ms: u64,
 }
 
 /// Stable scope attached to every persisted causal fact.
@@ -173,6 +220,19 @@ impl IncidentJournal {
                 | JournalEvent::IncidentCompleted { .. }
                 | JournalEvent::IncidentResumed { .. }
                 | JournalEvent::EvidenceCommitted { .. } => {}
+                JournalEvent::ToolContext {
+                    elapsed_ms,
+                    output_bytes,
+                    result_class,
+                    ..
+                } => {
+                    projection.tool_calls += 1;
+                    projection.tool_elapsed_ms += *elapsed_ms;
+                    projection.tool_output_bytes += *output_bytes;
+                    if *result_class == super::tools::ToolResultClass::Succeeded {
+                        projection.successful_tool_calls += 1;
+                    }
+                }
                 JournalEvent::PhaseStarted { phase, at_ms } => {
                     if let Some(slot) = phase_starts.iter_mut().find(|(item, _)| item == phase) {
                         slot.1 = Some(*at_ms);
@@ -219,6 +279,14 @@ pub struct EfficiencyProjection {
     pub known_cost_micro_usd: u64,
     /// Number of attempts whose cost was unknown.
     pub unknown_cost_attempts: u32,
+    /// Number of model-directed context calls.
+    pub tool_calls: u32,
+    /// Number of context calls that committed evidence.
+    pub successful_tool_calls: u32,
+    /// Sum of bounded context-call durations.
+    pub tool_elapsed_ms: u64,
+    /// Sum of bounded result bytes retained for provider resumption.
+    pub tool_output_bytes: u64,
     /// Terminal provider, if one was recorded.
     pub terminal_provider: Option<ProviderKind>,
 }
@@ -239,4 +307,11 @@ impl EfficiencyProjection {
 /// Converts an adapter-neutral attempt into a journal event.
 pub fn attempt_event(attempt: AttemptRecord) -> JournalEvent {
     JournalEvent::ProviderAttempt(attempt)
+}
+
+/// Produces a stable, non-secret digest suitable for journal correlation.
+pub fn query_digest(query: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    query.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }

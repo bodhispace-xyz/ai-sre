@@ -371,7 +371,9 @@ async fn run_live_with_context(
                         break;
                     }
                     for call in calls {
-                        let _ = execute_model_tool(
+                        let evidence_queries_before = runtime.budget_totals().2;
+                        let tool_started = std::time::Instant::now();
+                        let result = execute_model_tool(
                             grafana,
                             runtime,
                             board,
@@ -386,6 +388,18 @@ async fn run_live_with_context(
                                 _ => crate::reasoning::evidence::EvidenceError::EmptyPayload,
                             })
                         })?;
+                        let evidence_queries_after = runtime.budget_totals().2;
+                        runtime.record_tool_context(super::journal::ToolContextFacts {
+                            provider,
+                            tool: tool_name(&call.tool).to_owned(),
+                            query_digest: super::journal::query_digest(&call.query),
+                            result_class: result.class,
+                            elapsed_ms: tool_started.elapsed().as_millis() as u64,
+                            output_bytes: result.detail.len() as u64,
+                            evidence_queries_before,
+                            evidence_queries_after,
+                            at_ms: runtime.elapsed_ms(),
+                        });
                     }
                     turn = match runtime.remaining() {
                         Some(remaining) => timeout(
@@ -418,6 +432,13 @@ async fn run_live_with_context(
             }
         }
         at_ms = runtime.elapsed_ms();
+    }
+}
+
+fn tool_name(tool: &super::tools::ContextTool) -> &'static str {
+    match tool {
+        super::tools::ContextTool::QueryLogs => "query_logs",
+        super::tools::ContextTool::QueryMetrics => "query_metrics",
     }
 }
 

@@ -398,6 +398,47 @@ fn journal_replay_derives_efficiency_without_turning_unknown_cost_into_zero() {
 }
 
 #[test]
+fn journal_projection_rebuilds_bounded_tool_usage_without_raw_queries() {
+    // Given a journaled model-directed context call with a safe query digest.
+    let query = "{app=\"api\"}";
+    let mut journal = IncidentJournal::default();
+    journal.append(JournalEvent::ToolContext {
+        provider: ProviderKind::OpenAi,
+        tool: "query_logs".to_owned(),
+        query_digest: ai_sre::reasoning::journal::query_digest(query),
+        result_class: ai_sre::reasoning::tools::ToolResultClass::Succeeded,
+        elapsed_ms: 37,
+        output_bytes: 512,
+        evidence_queries_before: 2,
+        evidence_queries_after: 3,
+        at_ms: 41,
+    });
+
+    // When the efficiency projection is rebuilt from raw facts.
+    let projection = journal.project();
+
+    // Then usage is retained while the raw LogQL expression is absent.
+    assert_eq!(projection.tool_calls, 1);
+    assert_eq!(projection.successful_tool_calls, 1);
+    assert_eq!(projection.tool_elapsed_ms, 37);
+    assert_eq!(projection.tool_output_bytes, 512);
+    assert_ne!(
+        journal.entries()[0].event,
+        JournalEvent::ToolContext {
+            provider: ProviderKind::OpenAi,
+            tool: "query_logs".to_owned(),
+            query_digest: query.to_owned(),
+            result_class: ai_sre::reasoning::tools::ToolResultClass::Succeeded,
+            elapsed_ms: 37,
+            output_bytes: 512,
+            evidence_queries_before: 2,
+            evidence_queries_after: 3,
+            at_ms: 41,
+        }
+    );
+}
+
+#[test]
 fn evidence_board_assigns_stable_ids_and_rejects_empty_tool_output() {
     // Given an empty run-scoped evidence board.
     let mut board = EvidenceBoard::default();

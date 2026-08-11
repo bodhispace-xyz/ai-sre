@@ -39,6 +39,7 @@ pub fn render_journal_metrics(journal: &IncidentJournal) -> String {
             JournalEvent::IncidentRecovered { .. } => incidents_recovered += 1,
             JournalEvent::IncidentCompleted { .. } => incidents_completed += 1,
             JournalEvent::IncidentResumed { .. } => incidents_resumed += 1,
+            JournalEvent::ToolContext { .. } => {}
             _ => {}
         }
     }

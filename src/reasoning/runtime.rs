@@ -89,6 +89,21 @@ impl IncidentRuntime {
         Ok(())
     }
 
+    /// Records one bounded model-directed context request without raw query data.
+    pub fn record_tool_context(&mut self, facts: super::journal::ToolContextFacts) {
+        self.journal.append(JournalEvent::ToolContext {
+            provider: facts.provider,
+            tool: facts.tool,
+            query_digest: facts.query_digest,
+            result_class: facts.result_class,
+            elapsed_ms: facts.elapsed_ms,
+            output_bytes: facts.output_bytes,
+            evidence_queries_before: facts.evidence_queries_before,
+            evidence_queries_after: facts.evidence_queries_after,
+            at_ms: facts.at_ms,
+        });
+    }
+
     /// Returns the configured per-incident evidence-query ceiling.
     pub const fn max_evidence_queries(&self) -> u32 {
         self.run.max_evidence_queries()
