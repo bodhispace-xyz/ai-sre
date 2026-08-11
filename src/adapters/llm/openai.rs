@@ -12,6 +12,12 @@ use std::{
 };
 
 use rig_core::client::ProviderClient;
+use rig_core::{
+    client::CompletionClient,
+    completion::{AssistantContent, CompletionModel},
+};
+
+use crate::reasoning::{contracts::DiagnosticReport, coordinator::FailureClass};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -236,6 +242,45 @@ pub fn rig_client(
             account_id: None,
         },
     )
+}
+
+/// Executes one OpenAI reasoning request with a refreshed short-lived token.
+///
+/// Rig remains entirely inside this adapter; core receives only normalized
+/// report JSON and safe failure classifications.
+pub async fn complete_with_rig(
+    access_token: impl Into<String>,
+    prompt: &str,
+) -> Result<(DiagnosticReport, Option<u64>), FailureClass> {
+    let client = rig_client(access_token).map_err(|_| FailureClass::TemporarilyUnavailable)?;
+    let model = client.completion_model(rig_core::providers::chatgpt::GPT_5_4);
+    let request = model.completion_request(prompt).build();
+    let response = model
+        .completion(request)
+        .await
+        .map_err(classify_rig_failure)?;
+    let json = response
+        .choice
+        .iter()
+        .filter_map(|content| match content {
+            AssistantContent::Text(text) => Some(text.text.as_str()),
+            _ => None,
+        })
+        .collect::<String>();
+    let report =
+        DiagnosticReport::from_provider_json(&json).map_err(|_| FailureClass::MalformedResponse)?;
+    Ok((report, Some(response.usage.total_tokens)))
+}
+
+fn classify_rig_failure(error: rig_core::completion::CompletionError) -> FailureClass {
+    match error
+        .provider_response_status()
+        .map(|status| status.as_u16())
+    {
+        Some(401 | 403) => FailureClass::AuthenticationRequired,
+        Some(429) => FailureClass::RateLimited,
+        _ => FailureClass::TemporarilyUnavailable,
+    }
 }
 
 #[derive(Debug, Deserialize)]
