@@ -157,21 +157,22 @@ async fn execute_model_tool(
         evidence_id: None,
         detail: "incident deadline exhausted during context query".to_owned(),
     });
-    if result.class == ToolResultClass::Succeeded {
-        if let Some(evidence_id) = &result.evidence_id {
-            if let Some(record) = context
-                .board
-                .records()
-                .iter()
-                .find(|record| &record.evidence_id == evidence_id)
-            {
-                let runtime_evidence_id = context.runtime.commit_evidence(
-                    record.source,
-                    record.query.clone(),
-                    record.payload.clone(),
-                    context.runtime.elapsed_ms(),
-                )?;
-                result.evidence_id = Some(runtime_evidence_id);
+    if let Some(evidence_id) = &result.evidence_id {
+        if let Some(record) = context
+            .board
+            .records()
+            .iter()
+            .find(|record| &record.evidence_id == evidence_id)
+        {
+            let runtime_evidence_id = context.runtime.commit_evidence_with_metadata(
+                record.source,
+                record.query.clone(),
+                record.payload.clone(),
+                record.metadata.clone(),
+                context.runtime.elapsed_ms(),
+            )?;
+            result.evidence_id = Some(runtime_evidence_id);
+            if result.class == ToolResultClass::Succeeded {
                 result.detail = redact_text(&String::from_utf8_lossy(&record.payload));
                 if result.detail.len() > 16_384 {
                     let mut limit = 16_384;

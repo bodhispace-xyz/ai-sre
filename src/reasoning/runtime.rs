@@ -15,7 +15,7 @@ use super::{
     coordinator::{
         AttemptFacts, CoordinatorError, FailureClass, ReasoningConfig, ReasoningRun, RunStatus,
     },
-    evidence::{EvidenceBoard, EvidenceError, EvidenceSource},
+    evidence::{EvidenceBoard, EvidenceError, EvidenceMetadata, EvidenceSource},
     journal::{IncidentJournal, JournalEvent, Phase, attempt_event},
     recorded::{RecordedOutcome, RecordedProvider},
     router::ProviderKind,
@@ -75,6 +75,26 @@ impl IncidentRuntime {
         at_ms: u64,
     ) -> Result<String, RuntimeError> {
         let evidence_id = self.evidence.commit(source, query, payload)?;
+        self.journal.append(JournalEvent::EvidenceCommitted {
+            evidence_id: evidence_id.clone(),
+            source,
+            at_ms,
+        });
+        Ok(evidence_id)
+    }
+
+    /// Commits evidence while preserving adapter-provided failure metadata.
+    pub fn commit_evidence_with_metadata(
+        &mut self,
+        source: EvidenceSource,
+        query: impl Into<String>,
+        payload: Vec<u8>,
+        metadata: EvidenceMetadata,
+        at_ms: u64,
+    ) -> Result<String, RuntimeError> {
+        let evidence_id = self
+            .evidence
+            .commit_with_metadata(source, query, payload, metadata)?;
         self.journal.append(JournalEvent::EvidenceCommitted {
             evidence_id: evidence_id.clone(),
             source,

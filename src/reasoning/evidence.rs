@@ -22,6 +22,39 @@ pub enum EvidenceSource {
     GrafanaMetrics,
 }
 
+/// Outcome metadata retained alongside every immutable evidence envelope.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvidenceMetadata {
+    /// Whether the envelope contains complete data or a bounded failure marker.
+    pub status: EvidenceStatus,
+    /// Optional source freshness measured by the adapter.
+    pub freshness_ms: Option<u64>,
+    /// Whether the source was cut off by an output or policy bound.
+    pub truncated: bool,
+    /// Safe, non-vendor error classification when the source did not complete.
+    pub error: Option<String>,
+}
+
+/// Stable classification for successful and failure evidence envelopes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvidenceStatus {
+    /// The source returned complete bounded data.
+    Complete,
+    /// The source returned data that was cut off by a bound.
+    Partial,
+    /// The source returned no usable data.
+    Empty,
+    /// The request was rejected before or at the read-only boundary.
+    Rejected,
+    /// The source exceeded its wall-clock deadline.
+    TimedOut,
+    /// The source could not be reached or exited unexpectedly.
+    Unavailable,
+    /// The incident allowance prevented a request from running.
+    BudgetExhausted,
+}
+
 /// One immutable tool result committed to the evidence board.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct EvidenceRecord {
@@ -33,6 +66,8 @@ pub struct EvidenceRecord {
     pub query: String,
     /// Bounded tool output.
     pub payload: Vec<u8>,
+    /// Freshness, truncation, and safe failure metadata.
+    pub metadata: EvidenceMetadata,
 }
 
 /// Evidence-board failures that preserve the previous immutable board.
@@ -66,6 +101,27 @@ impl EvidenceBoard {
         query: impl Into<String>,
         payload: Vec<u8>,
     ) -> Result<String, EvidenceError> {
+        self.commit_with_metadata(
+            source,
+            query,
+            payload,
+            EvidenceMetadata {
+                status: EvidenceStatus::Complete,
+                freshness_ms: None,
+                truncated: false,
+                error: None,
+            },
+        )
+    }
+
+    /// Commits a bounded successful or failure envelope without raw provider details.
+    pub fn commit_with_metadata(
+        &mut self,
+        source: EvidenceSource,
+        query: impl Into<String>,
+        payload: Vec<u8>,
+        metadata: EvidenceMetadata,
+    ) -> Result<String, EvidenceError> {
         if payload.is_empty() {
             return Err(EvidenceError::EmptyPayload);
         }
@@ -92,6 +148,7 @@ impl EvidenceBoard {
             source,
             query,
             payload,
+            metadata,
         });
         Ok(evidence_id)
     }
