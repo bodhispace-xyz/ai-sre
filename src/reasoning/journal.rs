@@ -32,6 +32,12 @@ pub enum JournalEvent {
         incident_id: String,
         /// Normalized alert name.
         alert_name: String,
+        /// Labels required to reconstruct a pending shadow investigation.
+        #[serde(default)]
+        labels: std::collections::BTreeMap<String, String>,
+        /// Annotations retained for the pending investigation context.
+        #[serde(default)]
+        annotations: std::collections::BTreeMap<String, String>,
         /// Source event time used for stale-event ordering.
         #[serde(default)]
         event_time: String,

@@ -174,6 +174,8 @@ mod tests {
             .append(JournalEvent::IncidentOpened {
                 incident_id: "secret-incident-id".to_owned(),
                 alert_name: "ApiDown".to_owned(),
+                labels: std::collections::BTreeMap::new(),
+                annotations: std::collections::BTreeMap::new(),
                 event_time: String::new(),
                 source_event_id: String::new(),
             })

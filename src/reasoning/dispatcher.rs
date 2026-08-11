@@ -261,6 +261,8 @@ impl IncidentDispatcher {
                 self.journal.append(JournalEvent::IncidentOpened {
                     incident_id: incident.incident_id.clone(),
                     alert_name: incident.alert_name.clone(),
+                    labels: incident.labels.clone(),
+                    annotations: incident.annotations.clone(),
                     event_time: incident.event_time.clone(),
                     source_event_id: incident.source_event_id.clone(),
                 })?;
@@ -313,6 +315,8 @@ impl IncidentDispatcher {
                 self.journal.append(JournalEvent::IncidentOpened {
                     incident_id: incident.incident_id.clone(),
                     alert_name: incident.alert_name.clone(),
+                    labels: incident.labels.clone(),
+                    annotations: incident.annotations.clone(),
                     event_time: incident.event_time.clone(),
                     source_event_id: incident.source_event_id.clone(),
                 })?;
@@ -355,6 +359,8 @@ impl IncidentDispatcher {
                 self.journal.append(JournalEvent::IncidentOpened {
                     incident_id: incident.incident_id.clone(),
                     alert_name: incident.alert_name.clone(),
+                    labels: incident.labels.clone(),
+                    annotations: incident.annotations.clone(),
                     event_time: incident.event_time.clone(),
                     source_event_id: incident.source_event_id.clone(),
                 })?;
@@ -398,6 +404,65 @@ impl IncidentDispatcher {
     /// Returns the durable journal for replay and later investigation wiring.
     pub fn journal(&self) -> &JournalStore {
         &self.journal
+    }
+
+    /// Reconstructs firing episodes that were admitted before a restart but
+    /// never reached a durable terminal completion.
+    pub fn pending_investigations(&self) -> Vec<IncidentSignal> {
+        self.lifecycle
+            .iter()
+            .filter_map(|(key, state)| {
+                let LifecycleState::Firing {
+                    episode,
+                    completed: false,
+                    last_event_time,
+                    last_event_time_ms,
+                    last_source_event_id,
+                    ..
+                } = state
+                else {
+                    return None;
+                };
+                let opened = self
+                    .journal
+                    .journal()
+                    .entries()
+                    .iter()
+                    .rev()
+                    .find_map(|entry| match &entry.event {
+                        JournalEvent::IncidentOpened {
+                            incident_id,
+                            alert_name,
+                            labels,
+                            annotations,
+                            ..
+                        } if correlation_key(incident_id) == *key => Some((
+                            incident_id.clone(),
+                            alert_name.clone(),
+                            labels.clone(),
+                            annotations.clone(),
+                        )),
+                        _ => None,
+                    })?;
+                let incident_id = if *episode == 1 {
+                    opened.0
+                } else {
+                    format!("incident-{key}-episode-{episode}")
+                };
+                Some(IncidentSignal {
+                    correlation_id: key.clone(),
+                    incident_id,
+                    episode: *episode,
+                    alert_name: opened.1,
+                    status: AlertStatus::Firing,
+                    labels: opened.2,
+                    annotations: opened.3,
+                    event_time: last_event_time.clone(),
+                    source_event_id: last_source_event_id.clone(),
+                    event_time_ms: *last_event_time_ms,
+                })
+            })
+            .collect()
     }
 
     /// Durably marks a firing episode complete after report admission.

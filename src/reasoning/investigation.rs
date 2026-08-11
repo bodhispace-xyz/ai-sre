@@ -755,6 +755,8 @@ impl ShadowInvestigator {
         self.journal.append(JournalEvent::IncidentOpened {
             incident_id: signal.incident_id.clone(),
             alert_name: signal.alert_name.clone(),
+            labels: signal.labels.clone(),
+            annotations: signal.annotations.clone(),
             event_time: signal.event_time.clone(),
             source_event_id: signal.source_event_id.clone(),
         })?;

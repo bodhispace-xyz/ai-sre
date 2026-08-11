@@ -109,8 +109,27 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
         worker_metrics
             .replace_from(dispatcher.journal().journal())
             .await;
-        'worker: while let Some(command) = receiver.recv().await {
-            let incidents = match dispatcher.process_new(command.batch) {
+        let pending = dispatcher.pending_investigations();
+        let mut startup_command = (!pending.is_empty()).then(|| {
+            let (acknowledged, _ignored_ack) = oneshot::channel();
+            IntakeCommand {
+                batch: crate::transport::IntakeBatch { incidents: pending },
+                acknowledged,
+            }
+        });
+        'worker: loop {
+            let startup = startup_command.is_some();
+            let Some(command) = (match startup_command.take() {
+                Some(command) => Some(command),
+                None => receiver.recv().await,
+            }) else {
+                break;
+            };
+            let incidents = match if startup {
+                Ok(command.batch.incidents)
+            } else {
+                dispatcher.process_new(command.batch)
+            } {
                 Ok(incidents) => {
                     let _ = command.acknowledged.send(Ok(()));
                     incidents

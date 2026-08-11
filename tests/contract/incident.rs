@@ -91,6 +91,8 @@ fn journal_store_replays_entries_and_continues_the_sequence() {
         .append(JournalEvent::IncidentOpened {
             incident_id: "incident-fp-123".to_owned(),
             alert_name: "ApiDown".to_owned(),
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
             event_time: String::new(),
             source_event_id: String::new(),
         })
@@ -129,6 +131,8 @@ fn journal_and_notification_intent_commit_atomically() {
             &[JournalEvent::IncidentOpened {
                 incident_id: "incident-outbox".to_owned(),
                 alert_name: "ApiDown".to_owned(),
+                labels: BTreeMap::new(),
+                annotations: BTreeMap::new(),
                 event_time: String::new(),
                 source_event_id: String::new(),
             }],

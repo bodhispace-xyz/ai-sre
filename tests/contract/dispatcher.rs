@@ -260,3 +260,42 @@ fn later_recovery_and_terminal_recurrence_preserve_episode_identity() {
     assert!(third[0].incident_id.ends_with("-episode-3"));
     let _ = std::fs::remove_file(path);
 }
+
+#[test]
+fn incomplete_firing_is_reconstructed_for_restart_recovery() {
+    // Given an acknowledged firing episode whose investigation did not finish.
+    let path = std::env::temp_dir().join(format!(
+        "ai-sre-pending-recovery-{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut dispatcher = IncidentDispatcher::new(JournalStore::open(&path).expect("journal"));
+    let alert = AlertSignal {
+        status: AlertStatus::Firing,
+        fingerprint: "fp-pending".to_owned(),
+        labels: BTreeMap::from([
+            (String::from("alertname"), String::from("ApiDown")),
+            (String::from("service"), String::from("api")),
+        ]),
+        annotations: BTreeMap::new(),
+        starts_at: "2026-08-11T10:00:00Z".to_owned(),
+        ends_at: String::new(),
+        generator_url: String::new(),
+    };
+    dispatcher
+        .process_new(IntakeBatch {
+            incidents: vec![normalize(alert)],
+        })
+        .expect("admit firing");
+    drop(dispatcher);
+
+    // When the journal is reopened after a process restart.
+    let reopened = IncidentDispatcher::new(JournalStore::open(&path).expect("reopen journal"));
+    let pending = reopened.pending_investigations();
+
+    // Then the same scoped signal is available for exactly-once re-investigation.
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].incident_id, "incident-fp-pending");
+    assert_eq!(pending[0].labels.get("service"), Some(&"api".to_owned()));
+    let _ = std::fs::remove_file(path);
+}

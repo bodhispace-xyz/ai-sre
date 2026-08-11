@@ -84,6 +84,8 @@ async fn metrics_endpoint_requires_auth_and_exposes_fixed_aggregate_names() {
         .append(JournalEvent::IncidentOpened {
             incident_id: "private-id".to_owned(),
             alert_name: "ApiDown".to_owned(),
+            labels: std::collections::BTreeMap::new(),
+            annotations: std::collections::BTreeMap::new(),
             event_time: String::new(),
             source_event_id: String::new(),
         })
