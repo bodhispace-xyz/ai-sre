@@ -28,9 +28,27 @@ express clearly. Documentation is not measured by comment count.
 - Test names describe observable behavior and read as specifications.
 - Contract, integration, acceptance, and multi-step tests use explicit
   `// Given`, `// When`, and `// Then` sections:
-  - `Given` establishes state and inputs.
-  - `When` performs the single behavior under test.
-  - `Then` asserts externally observable results.
+  - `Given` must state the relevant setup and inputs in plain language.
+  - `When` must state the single behavior being exercised, not merely repeat
+    the next line of code.
+  - `Then` must state the externally observable outcome being protected.
+- Never use empty ceremonial labels such as `// Given` followed only by code.
+  The comment must add context that would be missing from the code itself.
+  For example:
+
+  ```rust
+  // Given a LogQL expression and the policy-selected Loki datasource.
+  let query = GcxQuery::logs("{app=\"api\"}", "loki");
+
+  // When the typed request is lowered to the child-process argument vector.
+  let argv = query.argv();
+
+  // Then only the documented logs-query capability is present, never `gcx api`.
+  assert_eq!(argv.first().map(String::as_str), Some("logs"));
+  ```
+
+  This is useful because the comments explain the safety intent; the following
+  code can change during refactoring without weakening the scenario's meaning.
 - A short unit test whose setup, action, and assertion are already unmistakable
   may use clear names and blank-line separation instead of ceremonial comments.
 - Do not hide important behavior inside generic Given/When/Then helpers. Extract

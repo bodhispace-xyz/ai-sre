@@ -51,3 +51,20 @@ The complete product contract, MVP scope, acceptance examples, capability bounda
 
 Contributor-facing Rust documentation and test readability rules are in
 [Rust documentation and test style](docs/engineering/rust-documentation-and-test-style.md).
+
+## Local development
+
+The `Makefile` keeps local validation aligned with the Rust CI workflow:
+
+```text
+make run ARGS="--help"  # run the binary
+make test                # run the CI nextest profile
+make ci                  # run formatting, Clippy, tests, docs, and cargo-deny
+```
+
+Install the pinned CI-only tools once with `make install-ci-tools`.
+Use `make help` to see every available command.
+
+If Nix and direnv are installed, run `direnv allow` once in the repository.
+The committed `.envrc` then activates the locked project development shell on
+entry; `nix develop` remains available as the explicit equivalent.

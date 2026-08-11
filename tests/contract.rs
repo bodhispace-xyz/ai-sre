@@ -2,3 +2,6 @@
 
 #[path = "contract/providers.rs"]
 mod providers;
+
+#[path = "contract/gcx.rs"]
+mod gcx;
