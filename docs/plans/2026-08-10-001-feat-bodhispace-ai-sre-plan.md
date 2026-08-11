@@ -835,6 +835,14 @@ U0 has two exit gates. The **foundation contract gate** proves compilation, inte
 
 **Verification:** The Required Local and CI Checks pass, the dependency-direction test or lint catches a deliberate forbidden import, the container and pinned-SBOM toolchain build, and operator-run live smoke tests report each provider and `gcx` independently against the committed no-go table. U1-U3 and U10 require the foundation contract gate. U4 and the first U6 shadow deployment require accepted OpenAI and `gcx`; each fallback remains disabled until its own gate passes, and Gate A cannot pass until all selected MVP adapters are qualified.
 
+**U0 review boundary (2026-08-11):** The implementation now satisfies the durable shadow-foundation slice: SQLite WAL journaling, restart-safe lifecycle episodes, transactional notification intent, authenticated bounded Alertmanager intake, finite deadline-aware provider fallback, secret-safe evidence egress, and adapter/core dependency direction. The following U1 requirements remain explicitly open and must not be inferred from U0 completion:
+
+- **Must fix before paid fallback or mutation:** durable incident/daily/monthly cost ledgers; explicit `incident_id` and `run_id` on every causal journal fact; conservative reservation reconciliation that retains unknown usage; and accepted live qualification for each enabled provider plus pinned `gcx` checksum, runtime digest, and SBOM.
+- **Required before efficiency reporting:** rebuildable efficiency projections covering phase boundaries, active machine/provider/tool time, human wait, token/query/tool totals, budget utilization, provider path, known/unknown cost, and terminal outcome.
+- **Operational rule:** Gemini and DeepSeek remain disabled unless their fresh price catalogs, ceilings, evidence-egress checks, and live contract gates are all accepted. OpenAI remains bounded but its OAuth monetary cost stays explicitly unknown until trustworthy pricing exists.
+
+These are follow-up implementation and deployment gates, not hidden U0 acceptance criteria. The next implementation branch must start from the merged U0 branch and address the must-fix ledger and run-scoping work before enabling additional paid providers.
+
 ---
 
 ### U1 — Shadow Journal, Projections, Outbox, and Budget Foundation
