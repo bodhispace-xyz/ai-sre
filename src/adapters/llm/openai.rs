@@ -272,6 +272,38 @@ pub async fn complete_with_rig(
     Ok((report, Some(response.usage.total_tokens)))
 }
 
+/// Refreshes the cached session, atomically persists rotation, then completes.
+///
+/// This is the unattended service path: it never invokes device flow and never
+/// returns access or refresh token material to callers.
+pub async fn refresh_and_complete(
+    oauth: &OpenAiOAuth,
+    cache: &AuthCache,
+    prompt: &str,
+) -> Result<(DiagnosticReport, Option<u64>), FailureClass> {
+    let session = cache
+        .load()
+        .map_err(|error| match error {
+            CacheError::Invalid => FailureClass::AuthenticationRequired,
+            CacheError::Io => FailureClass::TemporarilyUnavailable,
+        })?
+        .ok_or(FailureClass::AuthenticationRequired)?;
+    let refreshed = oauth
+        .refresh(&session)
+        .await
+        .map_err(|failure| match failure {
+            RefreshFailure::ReauthenticationRequired => FailureClass::AuthenticationRequired,
+            RefreshFailure::TemporarilyUnavailable => FailureClass::TemporarilyUnavailable,
+        })?;
+    cache
+        .store(&RefreshSession::new(refreshed.refresh_token))
+        .map_err(|error| match error {
+            CacheError::Invalid => FailureClass::AuthenticationRequired,
+            CacheError::Io => FailureClass::TemporarilyUnavailable,
+        })?;
+    complete_with_rig(refreshed.access_token, prompt).await
+}
+
 fn classify_rig_failure(error: rig_core::completion::CompletionError) -> FailureClass {
     match error
         .provider_response_status()
