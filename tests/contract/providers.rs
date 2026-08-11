@@ -7,7 +7,10 @@ use ai_sre::adapters::llm::{
 };
 use ai_sre::reasoning::budget::{BudgetConfig, BudgetError, BudgetState, Reservation};
 use ai_sre::reasoning::contracts::{ContractError, DiagnosticReport, EvidenceRef};
-use ai_sre::reasoning::coordinator::{CoordinatorError, ReasoningConfig, ReasoningRun, RunStatus};
+use ai_sre::reasoning::coordinator::{
+    AttemptFacts, AttemptOutcome, CoordinatorError, FailureClass, ReasoningConfig, ReasoningRun,
+    RunStatus,
+};
 use ai_sre::reasoning::router::{ProviderKind, ProviderOrder, next_provider, next_provider_in};
 
 #[test]
@@ -298,4 +301,38 @@ fn coordinator_rejects_wrong_completion_without_changing_active_run() {
         run.succeed(ProviderKind::OpenAi),
         Ok(RunStatus::Succeeded(ProviderKind::OpenAi))
     );
+}
+
+#[test]
+fn coordinator_preserves_unknown_cost_in_attempt_facts() {
+    // Given an admitted OpenAI attempt whose OAuth cost cannot be priced.
+    let mut run = ReasoningRun::new(ReasoningConfig::default()).expect("default config");
+    let reservation = Reservation {
+        provider_calls: 1,
+        tokens: 100,
+        evidence_queries: 2,
+        cost_micro_usd: 0,
+    };
+    assert_eq!(run.admit(reservation), Ok(Some(ProviderKind::OpenAi)));
+
+    // When the attempt fails after measured work with no trustworthy price.
+    run.fail_with(
+        ProviderKind::OpenAi,
+        FailureClass::TemporarilyUnavailable,
+        AttemptFacts {
+            elapsed_ms: 842,
+            tokens: Some(100),
+            evidence_queries: 2,
+            cost_micro_usd: None,
+        },
+    )
+    .expect("active provider");
+
+    // Then the journal facts retain the unknown cost instead of recording zero.
+    assert_eq!(run.attempts().len(), 1);
+    assert_eq!(
+        run.attempts()[0].outcome,
+        AttemptOutcome::Failed(FailureClass::TemporarilyUnavailable)
+    );
+    assert_eq!(run.attempts()[0].facts.cost_micro_usd, None);
 }
