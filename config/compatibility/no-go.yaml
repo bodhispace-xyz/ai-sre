@@ -1,0 +1,21 @@
+# U0 compatibility decisions are explicit: a failed criterion blocks dependents.
+version: 1
+gates:
+  rig:
+    status: pending
+    criteria:
+      - unattended OpenAI refresh rotates atomically with interactive device flow disabled
+      - provider responses validate into core-owned types without Rig types crossing the boundary
+      - cancellation joins spawned work without leaks
+  gcx:
+    status: pending
+    criteria:
+      - bounded structured PromQL and LogQL queries work against the installed Grafana datasources
+      - the pinned binary cannot self-update and runs only the reviewed query subcommands
+      - credentials never appear in command arguments, output, or logs
+  gateway_protocol:
+    status: pending
+    criteria:
+      - canonical framing includes attempt and fencing identifiers
+      - duplicate receipts are rejected without repeating an action
+      - shell syntax, forwarding, PTY, unknown operations, and arbitrary targets are rejected

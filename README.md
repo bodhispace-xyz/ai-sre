@@ -48,3 +48,6 @@ flowchart LR
 The first deployable slice ends at a shadow-mode report and ntfy notification. OpenTelemetry is emitted from that first slice without making export a dependency; Tempo is added later in the MVP before supervised mutation is enabled.
 
 The complete product contract, MVP scope, acceptance examples, capability boundaries, and research foundations are in the [BodhiSpace AI SRE plan](docs/plans/2026-08-10-001-feat-bodhispace-ai-sre-plan.md).
+
+Contributor-facing Rust documentation and test readability rules are in
+[Rust documentation and test style](docs/engineering/rust-documentation-and-test-style.md).

@@ -1,0 +1,12 @@
+.git
+.github
+.idea
+target
+docs
+tests
+config
+*.md
+*.log
+.env
+.env.*
+!.env.example

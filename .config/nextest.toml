@@ -1,0 +1,4 @@
+[profile.ci]
+fail-fast = false
+flaky-result = "fail"
+slow-timeout = { period = "30s", terminate-after = 2 }
