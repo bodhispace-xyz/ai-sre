@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use ai_sre::reasoning::{
-    incident::{AlertSignal, AlertStatus, normalize},
+    incident::{AlertSignal, AlertStatus, normalize, parse_rfc3339_millis, validate_webhook},
     journal::{JournalContext, JournalEvent},
     storage::JournalStore,
 };
@@ -42,6 +42,46 @@ fn duplicate_lifecycle_signals_share_one_incident_identity() {
 }
 
 #[test]
+fn rfc3339_ordering_uses_the_utc_instant_and_rejects_invalid_values() {
+    // Given equivalent timestamps expressed with different offsets.
+    let utc = parse_rfc3339_millis("2026-08-11T10:00:00Z").expect("valid timestamp");
+    let offset = parse_rfc3339_millis("2026-08-11T12:00:00+02:00").expect("valid timestamp");
+
+    // When timestamps are normalized for ordering.
+    assert_eq!(utc, offset);
+    assert!(parse_rfc3339_millis("not-a-time").is_none());
+    assert!(parse_rfc3339_millis("2026-08-11T10:00:00+25:00").is_none());
+}
+
+#[test]
+fn webhook_semantics_require_complete_alert_identity_and_time() {
+    // Given a malformed alert that deserializes but cannot be correlated safely.
+    let webhook = ai_sre::reasoning::incident::AlertmanagerWebhook {
+        version: String::new(),
+        group_key: String::new(),
+        truncated_alerts: 0,
+        status: String::new(),
+        receiver: String::new(),
+        group_labels: BTreeMap::new(),
+        common_labels: BTreeMap::new(),
+        common_annotations: BTreeMap::new(),
+        external_url: String::new(),
+        alerts: vec![AlertSignal {
+            status: AlertStatus::Firing,
+            fingerprint: String::new(),
+            labels: BTreeMap::new(),
+            annotations: BTreeMap::new(),
+            starts_at: String::new(),
+            ends_at: String::new(),
+            generator_url: String::new(),
+        }],
+    };
+
+    // Then intake rejects it before queue admission.
+    assert!(!validate_webhook(&webhook));
+}
+
+#[test]
 fn journal_store_replays_entries_and_continues_the_sequence() {
     // Given a new journal file containing one incident fact.
     let path = std::env::temp_dir().join(format!("ai-sre-journal-{}.jsonl", std::process::id()));
@@ -52,6 +92,7 @@ fn journal_store_replays_entries_and_continues_the_sequence() {
             incident_id: "incident-fp-123".to_owned(),
             alert_name: "ApiDown".to_owned(),
             event_time: String::new(),
+            source_event_id: String::new(),
         })
         .expect("append opening");
     assert_eq!(sequence, 0);
@@ -63,6 +104,7 @@ fn journal_store_replays_entries_and_continues_the_sequence() {
         .append(JournalEvent::IncidentRecovered {
             incident_id: "incident-fp-123".to_owned(),
             event_time: String::new(),
+            source_event_id: String::new(),
         })
         .expect("append recovery");
 
@@ -88,6 +130,7 @@ fn journal_and_notification_intent_commit_atomically() {
                 incident_id: "incident-outbox".to_owned(),
                 alert_name: "ApiDown".to_owned(),
                 event_time: String::new(),
+                source_event_id: String::new(),
             }],
             Some(&ai_sre::reasoning::storage::OutboxMessage {
                 delivery_id: "incident-outbox:report".to_owned(),

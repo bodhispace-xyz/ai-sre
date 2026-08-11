@@ -9,7 +9,7 @@ use ai_sre::{
 #[test]
 fn intake_accepts_only_the_bounded_alertmanager_webhook() {
     // Given a valid Alertmanager request with one firing alert.
-    let body = br#"{"version":"4","groupKey":"{}:{alertname=\"ApiDown\"}","truncatedAlerts":0,"status":"firing","receiver":"ai-sre","groupLabels":{"alertname":"ApiDown"},"commonLabels":{"service":"api"},"commonAnnotations":{},"externalURL":"https://alertmanager.example","alerts":[{"status":"firing","fingerprint":"fp-1","labels":{"alertname":"ApiDown","service":"api"},"annotations":{}}]}"#;
+    let body = br#"{"version":"4","groupKey":"{}:{alertname=\"ApiDown\"}","truncatedAlerts":0,"status":"firing","receiver":"ai-sre","groupLabels":{"alertname":"ApiDown"},"commonLabels":{"service":"api"},"commonAnnotations":{},"externalURL":"https://alertmanager.example","alerts":[{"status":"firing","fingerprint":"fp-1","labels":{"alertname":"ApiDown","service":"api"},"annotations":{},"startsAt":"2026-08-11T10:00:00Z","endsAt":"0001-01-01T00:00:00Z","generatorURL":"https://prometheus"}]}"#;
     let request = format!(
         "POST /webhooks/alertmanager HTTP/1.1\r\nContent-Length: {}\r\n\r\n{}",
         body.len(),
@@ -39,7 +39,7 @@ async fn authenticated_fragmented_request_waits_for_durable_ack() {
             .with_bearer_tokens("current-secret", Some("next-secret"))
             .serve(listener, sender),
     );
-    let body = br#"{"alerts":[{"status":"firing","fingerprint":"fp-auth","labels":{"alertname":"ApiDown"},"annotations":{}}]}"#;
+    let body = br#"{"alerts":[{"status":"firing","fingerprint":"fp-auth","labels":{"alertname":"ApiDown"},"annotations":{},"startsAt":"2026-08-11T10:00:00Z","endsAt":"0001-01-01T00:00:00Z","generatorURL":"https://prometheus"}]}"#;
     let request = format!(
         "POST /webhooks/alertmanager HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer current-secret\r\nContent-Length: {}\r\n\r\n{}",
         body.len(),
@@ -85,6 +85,7 @@ async fn metrics_endpoint_requires_auth_and_exposes_fixed_aggregate_names() {
             incident_id: "private-id".to_owned(),
             alert_name: "ApiDown".to_owned(),
             event_time: String::new(),
+            source_event_id: String::new(),
         })
         .expect("append incident");
     let metrics = MetricsSnapshot::default();

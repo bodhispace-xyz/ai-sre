@@ -109,7 +109,7 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
         worker_metrics
             .replace_from(dispatcher.journal().journal())
             .await;
-        while let Some(command) = receiver.recv().await {
+        'worker: while let Some(command) = receiver.recv().await {
             let incidents = match dispatcher.process_new(command.batch) {
                 Ok(incidents) => {
                     let _ = command.acknowledged.send(Ok(()));
@@ -203,6 +203,8 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
                         dispatcher.mark_completed_with_outbox(&incident.incident_id, outbox)
                     {
                         eprintln!("incident completion journal failed: {error}");
+                        let _ = worker_failed.send(());
+                        break 'worker;
                     }
                 }
                 drain_outbox(&mut dispatcher, ntfy.as_ref()).await;

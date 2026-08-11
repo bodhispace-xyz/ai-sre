@@ -120,7 +120,10 @@ async fn execute_model_tool(
         return Ok(result);
     }
     context.journal.append_checkpoint_scoped(
-        &format!("tool-request:{}", call.call_id),
+        &format!(
+            "tool-request:{}:{}:{}",
+            context.journal_context.incident_id, context.journal_context.run_id, call.call_id
+        ),
         &[JournalEvent::ToolRequested {
             provider,
             call_id: call.call_id.clone(),
@@ -753,6 +756,7 @@ impl ShadowInvestigator {
             incident_id: signal.incident_id.clone(),
             alert_name: signal.alert_name.clone(),
             event_time: signal.event_time.clone(),
+            source_event_id: signal.source_event_id.clone(),
         })?;
         self.journal.append(JournalEvent::PhaseStarted {
             phase: Phase::Investigation,

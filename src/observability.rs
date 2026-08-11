@@ -175,6 +175,7 @@ mod tests {
                 incident_id: "secret-incident-id".to_owned(),
                 alert_name: "ApiDown".to_owned(),
                 event_time: String::new(),
+                source_event_id: String::new(),
             })
             .expect("append incident");
         store

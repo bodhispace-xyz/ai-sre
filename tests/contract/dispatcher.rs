@@ -97,7 +97,6 @@ fn dispatcher_recovers_and_starts_a_new_episode_after_recurrence() {
             incidents: vec![recurrence],
         })
         .expect("recurrence");
-
     // Then recovery is accepted and recurrence receives a distinct episode ID.
     assert_eq!(next.len(), 1);
     assert_ne!(next[0].incident_id, first_id);
@@ -153,5 +152,111 @@ fn dispatcher_records_and_ignores_stale_events_after_restart() {
             .iter()
             .any(|entry| matches!(entry.event, JournalEvent::AlertOutOfOrder { .. }))
     );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn active_duplicate_firing_is_durable_but_not_new_work() {
+    // Given two identical firing alerts in one grouped delivery.
+    let path = std::env::temp_dir().join(format!(
+        "ai-sre-active-duplicate-{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut dispatcher = IncidentDispatcher::new(JournalStore::open(&path).expect("journal"));
+    let alert = AlertSignal {
+        status: AlertStatus::Firing,
+        fingerprint: "fp-active-duplicate".to_owned(),
+        labels: BTreeMap::from([(String::from("alertname"), String::from("ApiDown"))]),
+        annotations: BTreeMap::new(),
+        starts_at: "2026-08-11T10:00:00Z".to_owned(),
+        ends_at: String::new(),
+        generator_url: String::new(),
+    };
+    let first = normalize(alert.clone());
+    let second = normalize(alert);
+
+    // When both arrive before the first investigation completes.
+    let work = dispatcher
+        .process_new(IntakeBatch {
+            incidents: vec![first, second],
+        })
+        .expect("dispatch");
+
+    // Then only one investigation is scheduled, while the replay is recorded.
+    assert_eq!(work.len(), 1);
+    assert!(
+        dispatcher
+            .journal()
+            .journal()
+            .entries()
+            .iter()
+            .any(|entry| matches!(entry.event, JournalEvent::IncidentResumed { .. }))
+    );
+    let _ = std::fs::remove_file(path);
+}
+
+#[test]
+fn later_recovery_and_terminal_recurrence_preserve_episode_identity() {
+    // Given an incident that completes, recurs, and then recovers again.
+    let path = std::env::temp_dir().join(format!(
+        "ai-sre-episode-recovery-{}.sqlite",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut dispatcher = IncidentDispatcher::new(JournalStore::open(&path).expect("journal"));
+    let base = AlertSignal {
+        status: AlertStatus::Firing,
+        fingerprint: "fp-recovery".to_owned(),
+        labels: BTreeMap::from([(String::from("alertname"), String::from("ApiDown"))]),
+        annotations: BTreeMap::new(),
+        starts_at: "2026-08-11T10:00:00Z".to_owned(),
+        ends_at: String::new(),
+        generator_url: String::new(),
+    };
+    let first = normalize(base.clone());
+    let first_id = first.incident_id.clone();
+    dispatcher
+        .process_new(IntakeBatch {
+            incidents: vec![first],
+        })
+        .expect("first firing");
+    dispatcher
+        .mark_completed(&first_id)
+        .expect("complete first");
+    dispatcher
+        .process_new(IntakeBatch {
+            incidents: vec![normalize(AlertSignal {
+                starts_at: "2026-08-11T10:05:00Z".to_owned(),
+                ..base.clone()
+            })],
+        })
+        .expect("recurrence");
+    let recovery = normalize(AlertSignal {
+        status: AlertStatus::Resolved,
+        ends_at: "2026-08-11T10:06:00Z".to_owned(),
+        ..base.clone()
+    });
+    let recovered = dispatcher
+        .process(IntakeBatch {
+            incidents: vec![recovery],
+        })
+        .expect("recovery");
+    assert_eq!(recovered, vec![DispatchOutcome::Accepted]);
+    assert!(dispatcher.journal().journal().entries().iter().any(|entry| {
+        matches!(&entry.event, JournalEvent::IncidentRecovered { incident_id, .. } if incident_id.ends_with("-episode-2"))
+    }));
+    let third = dispatcher
+        .process_new(IntakeBatch {
+            incidents: vec![normalize(AlertSignal {
+                starts_at: "2026-08-11T10:07:00Z".to_owned(),
+                ..base
+            })],
+        })
+        .expect("third episode");
+
+    // Then the next firing is episode three, never a reuse of episode two.
+    assert_eq!(third[0].episode, 3);
+    assert!(third[0].incident_id.ends_with("-episode-3"));
     let _ = std::fs::remove_file(path);
 }

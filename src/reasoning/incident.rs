@@ -74,6 +74,22 @@ pub fn normalize_webhook(webhook: AlertmanagerWebhook) -> Vec<IncidentSignal> {
     webhook.alerts.into_iter().map(normalize).collect()
 }
 
+/// Validates the semantic fields required for safe lifecycle correlation.
+pub fn validate_webhook(webhook: &AlertmanagerWebhook) -> bool {
+    webhook.truncated_alerts == 0
+        && !webhook.alerts.is_empty()
+        && webhook.alerts.iter().all(|alert| {
+            let identity_present = !alert.fingerprint.trim().is_empty() || !alert.labels.is_empty();
+            let timestamp = match alert.status {
+                AlertStatus::Firing => &alert.starts_at,
+                AlertStatus::Resolved => &alert.ends_at,
+            };
+            identity_present
+                && !timestamp.trim().is_empty()
+                && parse_rfc3339_millis(timestamp).is_some()
+        })
+}
+
 /// Lifecycle state carried by an incoming alert.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -105,6 +121,8 @@ pub struct IncidentSignal {
     pub event_time: String,
     /// Stable source event identity for replay and diagnostics.
     pub source_event_id: String,
+    /// Parsed UTC milliseconds used for chronological ordering.
+    pub event_time_ms: Option<i128>,
 }
 
 /// Converts an external alert into a stable, secret-free incident signal.
@@ -132,6 +150,7 @@ pub fn normalize(signal: AlertSignal) -> IncidentSignal {
         },
         event_time
     );
+    let event_time_ms = parse_rfc3339_millis(&event_time);
     IncidentSignal {
         correlation_id: identity.clone(),
         incident_id: format!("incident-{identity}"),
@@ -142,7 +161,103 @@ pub fn normalize(signal: AlertSignal) -> IncidentSignal {
         annotations: signal.annotations,
         event_time,
         source_event_id,
+        event_time_ms,
     }
+}
+
+/// Parses the Alertmanager RFC3339 timestamp subset into UTC milliseconds.
+pub fn parse_rfc3339_millis(value: &str) -> Option<i128> {
+    let bytes = value.as_bytes();
+    if bytes.len() < 20
+        || bytes.get(4) != Some(&b'-')
+        || bytes.get(7) != Some(&b'-')
+        || bytes.get(10) != Some(&b'T')
+        || bytes.get(13) != Some(&b':')
+        || bytes.get(16) != Some(&b':')
+    {
+        return None;
+    }
+    let year = digits(bytes, 0, 4)? as i64;
+    let month = digits(bytes, 5, 2)? as i64;
+    let day = digits(bytes, 8, 2)? as i64;
+    let hour = digits(bytes, 11, 2)? as i64;
+    let minute = digits(bytes, 14, 2)? as i64;
+    let second = digits(bytes, 17, 2)? as i64;
+    if !(1..=12).contains(&month)
+        || !(1..=31).contains(&day)
+        || hour > 23
+        || minute > 59
+        || second > 59
+    {
+        return None;
+    }
+    let mut index = 19;
+    let mut millis = 0_i64;
+    if bytes.get(index) == Some(&b'.') {
+        index += 1;
+        let start = index;
+        while bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        if start == index {
+            return None;
+        }
+        let fraction = std::str::from_utf8(&bytes[start..index]).ok()?;
+        let mut digits = fraction.bytes().take(3).collect::<Vec<_>>();
+        while digits.len() < 3 {
+            digits.push(b'0');
+        }
+        millis = std::str::from_utf8(&digits).ok()?.parse().ok()?;
+    }
+    let offset_minutes = match bytes.get(index) {
+        Some(b'Z') if index + 1 == bytes.len() => 0_i64,
+        Some(b'+') | Some(b'-') => {
+            let sign = if bytes[index] == b'+' { 1 } else { -1 };
+            if index + 6 != bytes.len() || bytes.get(index + 3) != Some(&b':') {
+                return None;
+            }
+            let hours = digits(bytes, index + 1, 2)? as i64;
+            let minutes = digits(bytes, index + 4, 2)? as i64;
+            if hours > 23 || minutes > 59 {
+                return None;
+            }
+            sign * (hours * 60 + minutes)
+        }
+        _ => return None,
+    };
+    let days = days_from_civil(year, month, day)?;
+    Some(
+        (days * 86_400 + hour * 3_600 + minute * 60 + second - offset_minutes * 60) as i128 * 1_000
+            + i128::from(millis),
+    )
+}
+
+fn digits(bytes: &[u8], start: usize, length: usize) -> Option<u32> {
+    let end = start.checked_add(length)?;
+    let slice = bytes.get(start..end)?;
+    if !slice.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    std::str::from_utf8(slice).ok()?.parse().ok()
+}
+
+fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
+    let day_limit = match month {
+        2 => 28 + i64::from((year % 4 == 0 && year % 100 != 0) || year % 400 == 0),
+        4 | 6 | 9 | 11 => 30,
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        _ => return None,
+    };
+    if day > day_limit {
+        return None;
+    }
+    let adjusted_year = year - i64::from(month <= 2);
+    let era = adjusted_year.div_euclid(400);
+    let year_of_era = adjusted_year - era * 400;
+    let month_index = month + if month > 2 { -3 } else { 9 };
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some(era * 146_097 + day_of_era - 719_468)
 }
 
 fn stable_label_hash(labels: &BTreeMap<String, String>) -> String {

@@ -21,7 +21,9 @@ use tokio::{
 };
 
 use crate::observability::MetricsSnapshot;
-use crate::reasoning::incident::{AlertmanagerWebhook, IncidentSignal, normalize_webhook};
+use crate::reasoning::incident::{
+    AlertmanagerWebhook, IncidentSignal, normalize_webhook, validate_webhook,
+};
 
 /// The only HTTP route exposed by this intake.
 pub const ALERTMANAGER_PATH: &str = "/webhooks/alertmanager";
@@ -138,7 +140,10 @@ impl AlertIntake {
         next: Option<impl Into<String>>,
     ) -> Self {
         self.current_token = Some(SecretToken(current.into()));
-        self.next_token = next.map(|token| SecretToken(token.into()));
+        self.next_token = next
+            .map(Into::into)
+            .filter(|token: &String| !token.is_empty())
+            .map(SecretToken);
         self
     }
 
@@ -271,6 +276,9 @@ fn response_with_close(status: StatusCode) -> Response {
 fn parse_body(body: &[u8]) -> Result<IntakeBatch, IntakeError> {
     let webhook: AlertmanagerWebhook =
         serde_json::from_slice(body).map_err(|_| IntakeError::Malformed)?;
+    if !validate_webhook(&webhook) {
+        return Err(IntakeError::Malformed);
+    }
     Ok(IntakeBatch {
         incidents: normalize_webhook(webhook),
     })
@@ -280,6 +288,9 @@ fn authenticate(intake: &AlertIntake, headers: &HeaderMap) -> Result<(), IntakeE
     let Some(current) = &intake.current_token else {
         return Ok(());
     };
+    if current.0.is_empty() {
+        return Err(IntakeError::Unauthorized);
+    }
     let Some(value) = headers
         .get(axum::http::header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())
