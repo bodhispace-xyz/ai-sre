@@ -4,7 +4,12 @@
 //! are deployment-owned, and every process runs without a shell, inherited
 //! environment, or caller working directory.
 
-use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+use std::{
+    collections::BTreeMap,
+    path::PathBuf,
+    sync::{Arc, OnceLock},
+    time::Duration,
+};
 
 use thiserror::Error;
 use tokio::{io::AsyncReadExt, process::Command, sync::Semaphore, time};
@@ -18,6 +23,8 @@ use crate::reasoning::tools::{ContextTool, ToolCall, ToolResult, ToolResultClass
 const MAX_SELECTOR_BYTES: usize = 512;
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 const MAX_HISTORY_ENTRIES: usize = 50;
+const GLOBAL_CONTEXT_CONCURRENCY_LIMIT: usize = 64;
+static GLOBAL_CONTEXT_CONCURRENCY: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 /// A fixed, read-only capability that may be exposed to an investigator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -70,6 +77,7 @@ pub struct ReadOnlyRunner {
     timeout: Duration,
     max_output_bytes: usize,
     concurrency: Arc<Semaphore>,
+    global_concurrency: Arc<Semaphore>,
 }
 
 /// Deployment-owned selectors for the read-only context facade.
@@ -125,6 +133,7 @@ impl ReadOnlyRunner {
             timeout,
             max_output_bytes: max_output_bytes.clamp(1, MAX_OUTPUT_BYTES),
             concurrency: Arc::new(Semaphore::new(max_concurrency.max(1))),
+            global_concurrency: global_context_concurrency(),
         }
     }
 
@@ -134,6 +143,12 @@ impl ReadOnlyRunner {
         board: &mut EvidenceBoard,
         plan: &ReadOnlyCommand,
     ) -> Result<String, ContextError> {
+        let _global_permit = self
+            .global_concurrency
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| ContextError::ConcurrencyUnavailable)?;
         let _permit = self
             .concurrency
             .clone()
@@ -174,6 +189,12 @@ impl ReadOnlyRunner {
         .await
         .map_err(|_| ContextError::TimedOut)?
     }
+}
+
+fn global_context_concurrency() -> Arc<Semaphore> {
+    GLOBAL_CONTEXT_CONCURRENCY
+        .get_or_init(|| Arc::new(Semaphore::new(GLOBAL_CONTEXT_CONCURRENCY_LIMIT)))
+        .clone()
 }
 
 impl ReadOnlyContext {
