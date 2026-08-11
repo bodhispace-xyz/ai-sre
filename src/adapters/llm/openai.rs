@@ -18,7 +18,11 @@ use rig_core::{
 };
 
 use crate::reasoning::live::{LiveCompletion, LiveProvider};
-use crate::reasoning::{contracts::DiagnosticReport, coordinator::FailureClass};
+use crate::reasoning::{
+    contracts::DiagnosticReport,
+    coordinator::FailureClass,
+    tools::{ToolCall, parse_tool_call},
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -253,6 +257,17 @@ pub fn rig_client(
             access_token: access_token.into(),
             account_id: None,
         },
+    )
+}
+
+/// Converts a Rig tool call into the provider-neutral allowlisted contract.
+pub fn normalize_rig_tool_call(
+    call: &rig_core::completion::message::ToolCall,
+) -> Result<ToolCall, crate::reasoning::tools::ToolLoopError> {
+    parse_tool_call(
+        call.call_id.as_deref().unwrap_or(&call.id),
+        &call.function.name,
+        &call.function.arguments.to_string(),
     )
 }
 
