@@ -1,6 +1,8 @@
 //! Contract tests for secret-safe OpenAI OAuth session handling.
 
-use ai_sre::adapters::llm::openai::{RefreshFailure, RefreshSession};
+use std::{fs, os::unix::fs::PermissionsExt};
+
+use ai_sre::adapters::llm::openai::{AuthCache, CacheError, RefreshFailure, RefreshSession};
 
 #[test]
 fn refresh_session_rotates_without_exposing_tokens_in_debug_output() {
@@ -27,4 +29,59 @@ fn refresh_failure_is_classified_without_vendor_error_text() {
     // Then only the safe classification is observable by core logic.
     assert_eq!(failure, RefreshFailure::ReauthenticationRequired);
     assert!(!debug.contains("token"));
+}
+
+#[test]
+fn cache_replaces_refresh_tokens_atomically_and_reloads_them() {
+    // Given a private cache path and a newly rotated refresh session.
+    let directory = std::env::current_dir()
+        .expect("current directory")
+        .join("target")
+        .join(format!("ai-sre-openai-cache-{}", std::process::id()));
+    let path = directory.join("auth.json");
+    let cache = AuthCache::new(&path);
+
+    // When the session is stored and loaded again.
+    cache
+        .store(&RefreshSession::new("rotated-refresh-token"))
+        .expect("store cache");
+    let loaded = cache
+        .load()
+        .expect("load cache")
+        .expect("cache should exist");
+
+    // Then the token is recoverable, private, and no temporary file remains.
+    assert_eq!(loaded, RefreshSession::new("rotated-refresh-token"));
+    assert_eq!(
+        fs::metadata(&path)
+            .expect("cache metadata")
+            .permissions()
+            .mode()
+            & 0o777,
+        0o600
+    );
+    assert_eq!(
+        fs::read_dir(&directory).expect("cache directory").count(),
+        1
+    );
+    fs::remove_dir_all(directory).expect("remove cache fixture");
+}
+
+#[test]
+fn malformed_cache_fails_closed_without_returning_secret_content() {
+    // Given a cache file containing malformed JSON and a secret-looking value.
+    let directory = std::env::current_dir()
+        .expect("current directory")
+        .join("target")
+        .join(format!("ai-sre-openai-invalid-{}", std::process::id()));
+    fs::create_dir_all(&directory).expect("create cache directory");
+    let path = directory.join("auth.json");
+    fs::write(&path, br#"{\"refresh_token\": "secret"}"#).expect("write malformed cache");
+
+    // When the cache is loaded.
+    let result = AuthCache::new(&path).load();
+
+    // Then only the safe invalid-cache classification is returned.
+    assert_eq!(result, Err(CacheError::Invalid));
+    fs::remove_dir_all(directory).expect("remove cache fixture");
 }
