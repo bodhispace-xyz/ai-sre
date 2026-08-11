@@ -8,3 +8,6 @@ mod gcx;
 
 #[path = "contract/openai.rs"]
 mod openai;
+
+#[path = "contract/gateway.rs"]
+mod gateway;
