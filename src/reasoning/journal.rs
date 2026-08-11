@@ -24,6 +24,23 @@ pub enum Phase {
 /// Raw append-only fact for an incident.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JournalEvent {
+    /// Records the first signal for a normalized incident.
+    IncidentOpened {
+        /// Stable incident identity.
+        incident_id: String,
+        /// Normalized alert name.
+        alert_name: String,
+    },
+    /// Records a duplicate signal without starting another workflow.
+    AlertDeduplicated {
+        /// Existing incident identity.
+        incident_id: String,
+    },
+    /// Records recovery for an existing incident.
+    IncidentRecovered {
+        /// Stable incident identity.
+        incident_id: String,
+    },
     /// Records an evidence-board commit without storing credentials.
     EvidenceCommitted {
         /// Stable evidence identifier.
@@ -83,6 +100,10 @@ impl IncidentJournal {
         &self.entries
     }
 
+    pub(crate) fn restore(&mut self, entry: JournalEntry) {
+        self.entries.push(entry);
+    }
+
     /// Rebuilds efficiency metrics from raw facts only.
     pub fn project(&self) -> EfficiencyProjection {
         let mut projection = EfficiencyProjection::default();
@@ -94,7 +115,10 @@ impl IncidentJournal {
         ];
         for entry in &self.entries {
             match &entry.event {
-                JournalEvent::EvidenceCommitted { .. } => {}
+                JournalEvent::IncidentOpened { .. }
+                | JournalEvent::AlertDeduplicated { .. }
+                | JournalEvent::IncidentRecovered { .. }
+                | JournalEvent::EvidenceCommitted { .. } => {}
                 JournalEvent::PhaseStarted { phase, at_ms } => {
                     if let Some(slot) = phase_starts.iter_mut().find(|(item, _)| item == phase) {
                         slot.1 = Some(*at_ms);

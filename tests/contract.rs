@@ -11,3 +11,6 @@ mod openai;
 
 #[path = "contract/gateway.rs"]
 mod gateway;
+
+#[path = "contract/incident.rs"]
+mod incident;
