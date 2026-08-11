@@ -22,6 +22,7 @@ use super::{
     router::ProviderKind,
     runtime::{IncidentRuntime, RuntimeError},
     storage::{JournalStore, JournalStoreError},
+    tools::{ToolCall, ToolLoop, ToolLoopError, ToolResult, ToolResultClass},
 };
 
 /// Explicit read-only queries selected for one shadow investigation.
@@ -61,6 +62,46 @@ pub enum InvestigationError {
     /// The incident wall-clock budget expired before completion.
     #[error("shadow investigation wall-clock budget expired")]
     Deadline,
+}
+
+/// Executes one admitted provider tool call and transfers immutable evidence
+/// from the adapter board into the incident runtime.
+pub async fn execute_model_tool(
+    grafana: &GrafanaContext,
+    runtime: &mut IncidentRuntime,
+    board: &mut super::evidence::EvidenceBoard,
+    context_budget: &mut ContextBudget,
+    loop_state: &mut ToolLoop,
+    call: &ToolCall,
+) -> Result<ToolResult, InvestigationError> {
+    loop_state.admit(call).map_err(|error| match error {
+        ToolLoopError::TurnLimit => InvestigationError::Context(ContextError::QueryBudgetExceeded),
+        ToolLoopError::EmptyCallId
+        | ToolLoopError::EmptyQuery
+        | ToolLoopError::UnknownTool
+        | ToolLoopError::InvalidArguments => InvestigationError::Context(ContextError::Gcx(
+            crate::adapters::grafana::gcx::GcxRunError::InvalidQuery,
+        )),
+    })?;
+    runtime.reserve_evidence_query()?;
+    let result = grafana.execute_tool(board, context_budget, call).await;
+    if result.class == ToolResultClass::Succeeded {
+        if let Some(evidence_id) = &result.evidence_id {
+            if let Some(record) = board
+                .records()
+                .iter()
+                .find(|record| &record.evidence_id == evidence_id)
+            {
+                runtime.commit_evidence(
+                    record.source,
+                    record.query.clone(),
+                    record.payload.clone(),
+                    runtime.elapsed_ms(),
+                )?;
+            }
+        }
+    }
+    Ok(result)
 }
 
 /// Inputs for one live-provider investigation.
