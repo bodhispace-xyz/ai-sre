@@ -14,6 +14,7 @@ use super::{
     budget::Reservation,
     incident::IncidentSignal,
     journal::{JournalEvent, Phase},
+    live::{LiveProviders, run_live},
     recorded::RecordedProvider,
     router::ProviderKind,
     runtime::{IncidentRuntime, RuntimeError},
@@ -54,6 +55,102 @@ pub enum InvestigationError {
     /// The durable journal could not record a lifecycle fact.
     #[error("shadow investigation journal write failed")]
     Journal(#[from] JournalStoreError),
+}
+
+/// Inputs for one live-provider investigation.
+pub struct LiveInvestigationInput<'a> {
+    /// Read-only Grafana context.
+    pub grafana: &'a GrafanaContext,
+    /// Single-writer durable journal.
+    pub journal: &'a mut JournalStore,
+    /// Normalized incident signal.
+    pub signal: &'a IncidentSignal,
+    /// Fresh per-incident reasoning runtime.
+    pub runtime: &'a mut IncidentRuntime,
+    /// Configured live providers.
+    pub providers: LiveProviders<'a>,
+    /// Worst-case reservation for each provider restart.
+    pub reservation: Reservation,
+    /// Explicit read-only evidence queries.
+    pub queries: InvestigationQueries,
+    /// Monotonic incident timestamp.
+    pub start_at_ms: u64,
+}
+
+/// Runs one live-provider investigation using an existing single-writer journal.
+pub async fn investigate_live(
+    input: LiveInvestigationInput<'_>,
+) -> Result<InvestigationResult, InvestigationError> {
+    let LiveInvestigationInput {
+        grafana,
+        journal,
+        signal,
+        runtime,
+        providers,
+        reservation,
+        queries,
+        start_at_ms,
+    } = input;
+    journal.append(JournalEvent::PhaseStarted {
+        phase: Phase::Investigation,
+        at_ms: start_at_ms,
+    })?;
+    let mut collected = super::evidence::EvidenceBoard::default();
+    grafana.logs(&mut collected, queries.logs).await?;
+    grafana.metrics(&mut collected, queries.metrics).await?;
+    for record in collected.records() {
+        runtime.commit_evidence(
+            record.source,
+            record.query.clone(),
+            record.payload.clone(),
+            start_at_ms,
+        )?;
+    }
+    journal.append(JournalEvent::PhaseFinished {
+        phase: Phase::Investigation,
+        at_ms: start_at_ms,
+    })?;
+    let prompt = build_prompt(signal, runtime);
+    let status = run_live(runtime, providers, &prompt, reservation, start_at_ms).await?;
+    for entry in runtime.journal().entries() {
+        journal.append(entry.event.clone())?;
+    }
+    Ok(InvestigationResult {
+        incident_id: signal.incident_id.clone(),
+        evidence_ids: runtime
+            .evidence()
+            .records()
+            .iter()
+            .map(|record| record.evidence_id.clone())
+            .collect(),
+        status,
+        report: runtime.last_report().cloned().unwrap_or_else(|| {
+            super::contracts::DiagnosticReport {
+                summary: "No provider produced an accepted diagnosis within the incident budget."
+                    .to_owned(),
+                evidence: Vec::new(),
+            }
+        }),
+    })
+}
+
+fn build_prompt(signal: &IncidentSignal, runtime: &IncidentRuntime) -> String {
+    let mut prompt = format!(
+        "Diagnose incident {} (alert {}). Return strict JSON with summary and evidence citations.\n",
+        signal.incident_id, signal.alert_name
+    );
+    for record in runtime.evidence().records() {
+        let payload = String::from_utf8_lossy(&record.payload);
+        prompt.push_str(&format!(
+            "Evidence {} ({:?}, query={}): {}\n",
+            record.evidence_id, record.source, record.query, payload
+        ));
+        if prompt.len() >= 32_768 {
+            prompt.truncate(32_768);
+            break;
+        }
+    }
+    prompt
 }
 
 /// Runs one investigation and persists its redacted lifecycle facts.
