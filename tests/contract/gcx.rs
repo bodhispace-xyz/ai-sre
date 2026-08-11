@@ -80,6 +80,48 @@ fn valid_logql_pipes_and_promql_selectors_remain_data() {
     assert_eq!(metrics_result, Ok(()));
 }
 
+#[test]
+fn broad_or_high_cardinality_queries_are_rejected_before_spawn() {
+    // Given PromQL/LogQL expressions that can fan out across unbounded series or logs.
+    let broad_metrics = GcxQuery::metrics("topk(100, rate(http_requests_total[5m]))", "prometheus");
+    let metadata = GcxQuery::metrics("label_values(job)", "prometheus");
+    let unbounded_logs = GcxQuery::logs("{service=\"api\"} --limit 0", "loki");
+
+    // When the pure context policy validates them.
+    let results = [
+        broad_metrics.validate(4_096),
+        metadata.validate(4_096),
+        unbounded_logs.validate(4_096),
+    ];
+
+    // Then every expensive or discovery-shaped request is denied before GCX runs.
+    assert!(
+        results
+            .iter()
+            .all(|result| *result == Err(GcxRunError::InvalidQuery))
+    );
+}
+
+#[test]
+fn broad_query_policy_rejects_whitespace_equivalents() {
+    // Given equivalent expensive-query spellings with deliberately varied whitespace.
+    let queries = [
+        GcxQuery::metrics("topk (100, rate(up[5m]))", "prometheus"),
+        GcxQuery::metrics("rate(up{ }[5m])", "prometheus"),
+        GcxQuery::logs("{service=\"api\"} --limit\t0", "loki"),
+    ];
+
+    // When the pure policy validator canonicalizes their lexical spacing.
+    let results = queries.map(|query| query.validate(4_096));
+
+    // Then equivalent broad or unbounded requests are rejected consistently.
+    assert!(
+        results
+            .iter()
+            .all(|result| *result == Err(GcxRunError::InvalidQuery))
+    );
+}
+
 #[tokio::test]
 async fn runner_returns_bounded_stdout_from_a_successful_process() {
     // Given a harmless fixture process and a small output budget.

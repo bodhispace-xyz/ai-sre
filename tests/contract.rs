@@ -32,3 +32,6 @@ mod dispatcher;
 
 #[path = "contract/live.rs"]
 mod live;
+
+#[path = "contract/evidence_envelope.rs"]
+mod evidence_envelope;

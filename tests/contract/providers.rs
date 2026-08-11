@@ -845,6 +845,21 @@ fn bootstrap_rejects_zero_process_limits_before_assembling_adapters() {
 }
 
 #[test]
+fn bootstrap_rejects_relative_gcx_binary_paths() {
+    // Given a GCX path that would only resolve relative to the service cwd.
+    let config = AppConfig {
+        gcx_binary: std::path::PathBuf::from("./gcx"),
+        ..AppConfig::default()
+    };
+
+    // When startup validation checks the pinned process boundary.
+    let result = config.validate();
+
+    // Then the child cannot be configured with cwd-dependent resolution.
+    assert_eq!(result, Err(ConfigError::RelativeGcxPath));
+}
+
+#[test]
 fn bootstrap_builds_valid_non_secret_dependencies() {
     // Given the default versioned policy and resource limits.
     let config = AppConfig::default();
