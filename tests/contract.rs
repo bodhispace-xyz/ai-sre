@@ -23,3 +23,6 @@ mod ntfy;
 
 #[path = "contract/transport.rs"]
 mod transport;
+
+#[path = "contract/config.rs"]
+mod config;

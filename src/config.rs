@@ -3,7 +3,10 @@
 //! Credentials are injected separately; this file contains only policy,
 //! resource limits, paths, provider order, and datasource identifiers.
 
-use std::path::PathBuf;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -74,7 +77,33 @@ pub enum ConfigError {
     InvalidProviderOrder,
 }
 
+/// Configuration file loading failures that prevent startup.
+#[derive(Debug, Error)]
+pub enum ConfigLoadError {
+    /// The configuration file could not be read.
+    #[error("configuration file could not be read")]
+    Io(#[from] std::io::Error),
+    /// The configuration file was not valid JSON or policy.
+    #[error("configuration file is invalid")]
+    Parse(#[from] serde_json::Error),
+    /// The parsed configuration failed safety validation.
+    #[error("configuration file failed validation")]
+    Validation(#[from] ConfigError),
+}
+
 impl AppConfig {
+    /// Parses and validates a complete secret-free JSON configuration.
+    pub fn from_json(input: &str) -> Result<Self, ConfigLoadError> {
+        let config: Self = serde_json::from_str(input)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Loads and validates a complete JSON configuration from disk.
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, ConfigLoadError> {
+        Self::from_json(&fs::read_to_string(path)?)
+    }
+
     /// Rejects unsafe values before adapters or credentials are assembled.
     pub fn validate(&self) -> Result<(), ConfigError> {
         if self.openai_cache_path.as_os_str().is_empty()
