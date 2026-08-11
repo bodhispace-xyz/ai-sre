@@ -14,13 +14,30 @@ use super::{
 };
 
 /// Configurable inputs for one incident reasoning run.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReasoningConfig {
     /// Provider fallback order for complete restarts.
     pub provider_order: ProviderOrder,
     /// Per-incident resource ceilings.
     pub budget: super::budget::BudgetConfig,
+    /// Maximum model-directed context turns per provider run.
+    #[serde(default = "default_tool_turns")]
+    pub max_tool_turns: u32,
+}
+
+const fn default_tool_turns() -> u32 {
+    4
+}
+
+impl Default for ReasoningConfig {
+    fn default() -> Self {
+        Self {
+            provider_order: ProviderOrder::default(),
+            budget: super::budget::BudgetConfig::default(),
+            max_tool_turns: default_tool_turns(),
+        }
+    }
 }
 
 /// Safe terminal states of a reasoning run.

@@ -6,6 +6,11 @@
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Maximum provider correlation identifier bytes retained in a run.
+pub const MAX_TOOL_CALL_ID_BYTES: usize = 128;
+/// Maximum serialized provider argument bytes accepted before parsing.
+pub const MAX_TOOL_ARGUMENT_BYTES: usize = 16_384;
+
 /// The only model-directed context capabilities admitted by the MVP.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -33,6 +38,10 @@ pub fn parse_tool_call(
     name: &str,
     arguments: &str,
 ) -> Result<ToolCall, ToolLoopError> {
+    let call_id = call_id.into();
+    if call_id.len() > MAX_TOOL_CALL_ID_BYTES || arguments.len() > MAX_TOOL_ARGUMENT_BYTES {
+        return Err(ToolLoopError::OversizedArguments);
+    }
     let tool = match name {
         "query_logs" => ContextTool::QueryLogs,
         "query_metrics" => ContextTool::QueryMetrics,
@@ -42,7 +51,7 @@ pub fn parse_tool_call(
         .map_err(|_| ToolLoopError::InvalidArguments)?
         .query;
     let call = ToolCall {
-        call_id: call_id.into(),
+        call_id,
         tool,
         query,
     };
@@ -75,6 +84,8 @@ pub enum ToolResultClass {
     Stale,
     /// The incident budget or turn allowance was exhausted.
     Exhausted,
+    /// The read-only backend was unavailable or failed operationally.
+    Unavailable,
 }
 
 /// Provider-neutral result sent back to the same reasoning run.
@@ -104,6 +115,7 @@ pub struct ToolLoop {
     policy: ToolTurnPolicy,
     turns_used: u32,
     results: Vec<ToolResult>,
+    seen_call_ids: std::collections::BTreeSet<String>,
 }
 
 /// Errors that stop a tool request before any adapter I/O occurs.
@@ -121,6 +133,12 @@ pub enum ToolLoopError {
     /// Tool arguments did not match the strict JSON shape.
     #[error("tool arguments are invalid")]
     InvalidArguments,
+    /// Provider metadata exceeded the bounded adapter contract.
+    #[error("tool metadata exceeds its configured limit")]
+    OversizedArguments,
+    /// The provider reused a correlation identifier in one run.
+    #[error("tool call identifier was already used in this run")]
+    DuplicateCallId,
     /// The provider exceeded the finite tool-turn allowance.
     #[error("tool turn budget exhausted")]
     TurnLimit,
@@ -133,6 +151,7 @@ impl ToolLoop {
             policy,
             turns_used: 0,
             results: Vec::new(),
+            seen_call_ids: std::collections::BTreeSet::new(),
         }
     }
 
@@ -146,6 +165,9 @@ impl ToolLoop {
         }
         if self.turns_used >= self.policy.max_turns {
             return Err(ToolLoopError::TurnLimit);
+        }
+        if !self.seen_call_ids.insert(call.call_id.clone()) {
+            return Err(ToolLoopError::DuplicateCallId);
         }
         self.turns_used += 1;
         Ok(())
@@ -276,6 +298,25 @@ mod tests {
         // Then the same run can resume with the correlated result.
         assert_eq!(loop_state.results().len(), 1);
         assert_eq!(loop_state.results()[0].evidence_id.as_deref(), Some("ev-1"));
+        assert_eq!(loop_state.remaining(), 1);
+    }
+
+    #[test]
+    fn tool_loop_rejects_duplicate_correlation_ids() {
+        // Given a loop with capacity for two calls and one admitted identifier.
+        let mut loop_state = ToolLoop::new(ToolTurnPolicy::new(2).expect("positive limit"));
+        let call = ToolCall {
+            call_id: "same-id".to_owned(),
+            tool: ContextTool::QueryLogs,
+            query: "{app=\"api\"}".to_owned(),
+        };
+        loop_state.admit(&call).expect("first call");
+
+        // When the provider reuses that identifier for another request.
+        let duplicate = loop_state.admit(&call);
+
+        // Then no second backend operation is admitted.
+        assert_eq!(duplicate, Err(ToolLoopError::DuplicateCallId));
         assert_eq!(loop_state.remaining(), 1);
     }
 }

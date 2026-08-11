@@ -14,6 +14,7 @@ use super::{
     coordinator::{AttemptFacts, CoordinatorError, FailureClass, RunStatus},
     router::ProviderKind,
     runtime::{IncidentRuntime, RuntimeError},
+    tools::{ToolCall, ToolResult},
 };
 
 /// Optional live providers configured for one process.
@@ -27,14 +28,42 @@ pub struct LiveProviders<'a> {
 }
 
 /// Provider-neutral completion future returned by adapter capabilities.
-pub type LiveCompletion<'a> = Pin<
-    Box<dyn Future<Output = Result<(DiagnosticReport, Option<u64>), FailureClass>> + Send + 'a>,
->;
+pub type LiveCompletion<'a> =
+    Pin<Box<dyn Future<Output = Result<LiveTurn, FailureClass>> + Send + 'a>>;
+
+/// One provider turn, before the core decides whether to execute a tool.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LiveTurn {
+    /// The provider returned a complete advisory report.
+    Final {
+        /// Validated later against the runtime evidence board.
+        report: DiagnosticReport,
+        /// Provider-reported output token count, when available.
+        tokens: Option<u64>,
+    },
+    /// The provider requested one or more allowlisted context calls.
+    ToolCalls {
+        /// Normalized calls; arguments are still checked by the core loop.
+        calls: Vec<ToolCall>,
+        /// Provider-reported output token count, when available.
+        tokens: Option<u64>,
+    },
+}
 
 /// Core-owned provider capability; vendor adapters implement this boundary.
 pub trait LiveProvider: Sync {
     /// Completes one bounded prompt and returns provider-neutral facts.
     fn complete<'a>(&'a self, prompt: &'a str) -> LiveCompletion<'a>;
+
+    /// Completes a turn with prior tool results rendered into the same run.
+    fn complete_with_results<'a>(
+        &'a self,
+        prompt: &'a str,
+        results: &'a [ToolResult],
+    ) -> LiveCompletion<'a> {
+        let _ = results;
+        self.complete(prompt)
+    }
 }
 
 /// Executes the configured provider order with durable budget admission.
@@ -101,9 +130,10 @@ pub async fn run_live_with_alert_name(
                         Some(provider) => provider.complete(prompt).await,
                         None => Err(FailureClass::TemporarilyUnavailable),
                     },
-                    ProviderKind::Deterministic => {
-                        Ok((build_report(alert_name, &evidence_ids), None))
-                    }
+                    ProviderKind::Deterministic => Ok(LiveTurn::Final {
+                        report: build_report(alert_name, &evidence_ids),
+                        tokens: None,
+                    }),
                 }
             })
             .await
@@ -113,12 +143,16 @@ pub async fn run_live_with_alert_name(
         };
         let facts = AttemptFacts {
             elapsed_ms: started.elapsed().as_millis() as u64,
-            tokens: result.as_ref().ok().and_then(|(_, tokens)| *tokens),
+            tokens: result.as_ref().ok().and_then(|turn| match turn {
+                LiveTurn::Final { tokens, .. } | LiveTurn::ToolCalls { tokens, .. } => {
+                    tokens.as_ref().copied()
+                }
+            }),
             evidence_queries,
             ..AttemptFacts::default()
         };
         match result {
-            Ok((report, _)) => {
+            Ok(LiveTurn::Final { report, .. }) => {
                 if report
                     .validate_against(
                         &runtime
@@ -132,6 +166,9 @@ pub async fn run_live_with_alert_name(
                 {
                     return runtime.succeed_provider_with_report(provider, report, facts, at_ms);
                 }
+                runtime.fail_provider(provider, FailureClass::MalformedResponse, facts, at_ms)?;
+            }
+            Ok(LiveTurn::ToolCalls { .. }) => {
                 runtime.fail_provider(provider, FailureClass::MalformedResponse, facts, at_ms)?;
             }
             Err(failure) => runtime.fail_provider(provider, failure, facts, at_ms)?,

@@ -41,6 +41,7 @@ pub struct IncidentRuntime {
     last_report: Option<DiagnosticReport>,
     started_at: Instant,
     deadline: Instant,
+    max_tool_turns: u32,
 }
 
 impl IncidentRuntime {
@@ -48,6 +49,12 @@ impl IncidentRuntime {
     pub fn new(config: ReasoningConfig) -> Result<Self, RuntimeError> {
         let wall_time = Duration::from_secs(u64::from(config.budget.max_wall_time_secs));
         let started_at = Instant::now();
+        if config.max_tool_turns == 0 {
+            return Err(RuntimeError::Coordination(CoordinatorError::InvalidOrder(
+                "tool turn limit must be greater than zero",
+            )));
+        }
+        let max_tool_turns = config.max_tool_turns;
         Ok(Self {
             run: ReasoningRun::new(config)?,
             evidence: EvidenceBoard::default(),
@@ -55,6 +62,7 @@ impl IncidentRuntime {
             last_report: None,
             started_at,
             deadline: started_at + wall_time,
+            max_tool_turns,
         })
     }
 
@@ -84,6 +92,11 @@ impl IncidentRuntime {
     /// Returns the configured per-incident evidence-query ceiling.
     pub const fn max_evidence_queries(&self) -> u32 {
         self.run.max_evidence_queries()
+    }
+
+    /// Returns the configured finite model tool-turn limit.
+    pub const fn max_tool_turns(&self) -> u32 {
+        self.max_tool_turns
     }
 
     /// Returns current reserved budget totals for prompt and journal context.

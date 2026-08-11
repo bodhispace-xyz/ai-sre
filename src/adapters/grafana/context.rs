@@ -154,6 +154,12 @@ impl GrafanaContext {
                 evidence_id: None,
                 detail: "query rejected by context policy".to_owned(),
             },
+            Err(ContextError::Gcx(_)) => ToolResult {
+                call_id: call.call_id.clone(),
+                class: ToolResultClass::Unavailable,
+                evidence_id: None,
+                detail: "context backend unavailable".to_owned(),
+            },
             Err(_) => ToolResult {
                 call_id: call.call_id.clone(),
                 class: ToolResultClass::Denied,
