@@ -25,7 +25,10 @@ use crate::{
     },
     bootstrap,
     config::AppConfig,
-    observability::{MetricsSnapshot, StructuredLog, span_context},
+    observability::{
+        MetricsSnapshot, StructuredLog, span_context,
+        tracing::{TraceEvent, TraceExporter},
+    },
     reasoning::{
         budget::Reservation,
         dispatcher::IncidentDispatcher,
@@ -81,7 +84,9 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
         .unwrap_or_else(|| PathBuf::from("state/ai-sre.sqlite"));
     let (sender, mut receiver) = mpsc::channel::<IntakeCommand>(64);
     let metrics = MetricsSnapshot::default();
+    let traces = TraceExporter::start(env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(), 128);
     let worker_metrics = metrics.clone();
+    let worker_traces = traces.clone();
     let pages = IncidentPages::default();
     let worker_pages = pages.clone();
     let (worker_failed, worker_failed_rx) = oneshot::channel();
@@ -202,6 +207,18 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                 if let Some(span) = span_context("incident.investigation", "investigation") {
                     span.emit();
                 }
+                if let Some(exporter) = worker_traces.as_ref() {
+                    if let Some(event) = TraceEvent::new(
+                        &incident.incident_id,
+                        &run_id,
+                        "incident.investigation",
+                        "investigation",
+                        None,
+                        runtime.elapsed_ms(),
+                    ) {
+                        let _ = exporter.try_record(event);
+                    }
+                }
                 let global_budget_admitted = reserve_paid_budget(
                     dispatcher.journal_mut(),
                     &run_id,
@@ -250,6 +267,18 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                 }
                 if let Some(span) = span_context("incident.reasoning", "reasoning") {
                     span.emit();
+                }
+                if let Some(exporter) = worker_traces.as_ref() {
+                    if let Some(event) = TraceEvent::new(
+                        &incident.incident_id,
+                        &run_id,
+                        "incident.reasoning",
+                        "reasoning",
+                        None,
+                        runtime.elapsed_ms(),
+                    ) {
+                        let _ = exporter.try_record(event);
+                    }
                 }
                 if paid_provider_count > 0 && global_budget_admitted {
                     let actual_cost = runtime.journal().project();

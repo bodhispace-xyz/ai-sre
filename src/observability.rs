@@ -10,6 +10,9 @@ use tokio::sync::RwLock;
 
 use crate::reasoning::journal::{IncidentJournal, JournalEvent};
 
+/// Bounded OTLP/HTTP trace export.
+pub mod tracing;
+
 /// Low-cardinality phase labels accepted by telemetry emitters.
 pub const ALLOWED_PHASES: &[&str] = &["investigation", "reasoning", "human_wait", "execution"];
 
