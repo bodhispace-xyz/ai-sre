@@ -47,6 +47,9 @@ impl NtfyPublisher {
     /// Publishes an already-rendered outbox message with the same bounded
     /// transport and authentication policy.
     pub async fn publish_message(&self, message: &str) -> Result<(), NtfyError> {
+        if !self.config.is_valid() || message.len() > 64 * 1024 {
+            return Err(NtfyError::Rejected);
+        }
         let url = format!(
             "{}/{}",
             self.config.endpoint.trim_end_matches('/'),
@@ -66,6 +69,18 @@ impl NtfyPublisher {
             return Err(NtfyError::Rejected);
         }
         Ok(())
+    }
+}
+
+impl NtfyConfig {
+    /// Validates the server-owned endpoint and single publish topic.
+    pub fn is_valid(&self) -> bool {
+        !self.endpoint.trim().is_empty()
+            && self.endpoint.starts_with("https://")
+            && !self.topic.trim().is_empty()
+            && self.topic.len() <= 128
+            && !self.topic.contains('/')
+            && !self.topic.chars().any(char::is_control)
     }
 }
 

@@ -10,6 +10,63 @@ use tokio::sync::RwLock;
 
 use crate::reasoning::journal::{IncidentJournal, JournalEvent};
 
+/// Low-cardinality phase labels accepted by telemetry emitters.
+pub const ALLOWED_PHASES: &[&str] = &["investigation", "reasoning", "human_wait", "execution"];
+
+/// Bounded structured log fields. Payloads and query text are excluded.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructuredLog {
+    /// Stable lifecycle event name.
+    pub event: String,
+    /// Incident identity retained as a log field, never a metric label.
+    pub incident_id: String,
+    /// Run identity retained as a log field, never a metric label.
+    pub run_id: String,
+    /// Optional bounded phase name.
+    pub phase: Option<String>,
+}
+
+impl StructuredLog {
+    /// Creates a bounded structured event and rejects unknown phase labels.
+    pub fn new(
+        event: impl Into<String>,
+        incident_id: impl Into<String>,
+        run_id: impl Into<String>,
+        phase: Option<&str>,
+    ) -> Option<Self> {
+        let phase = phase.map(str::to_owned);
+        if phase
+            .as_deref()
+            .is_some_and(|value| !ALLOWED_PHASES.contains(&value))
+        {
+            return None;
+        }
+        Some(Self {
+            event: event.into().chars().take(128).collect(),
+            incident_id: incident_id.into().chars().take(128).collect(),
+            run_id: run_id.into().chars().take(128).collect(),
+            phase,
+        })
+    }
+}
+
+/// Bounded OTel-style span fields; export failure is non-blocking.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SpanContext {
+    /// Operation name.
+    pub name: String,
+    /// Controlled phase label.
+    pub phase: String,
+}
+
+/// Creates a span context only for an allowlisted phase.
+pub fn span_context(name: &str, phase: &str) -> Option<SpanContext> {
+    ALLOWED_PHASES.contains(&phase).then(|| SpanContext {
+        name: name.chars().take(128).collect(),
+        phase: phase.to_owned(),
+    })
+}
+
 /// In-process snapshot shared by the worker and the metrics HTTP handler.
 #[derive(Clone, Default)]
 pub struct MetricsSnapshot(Arc<RwLock<String>>);
@@ -161,7 +218,7 @@ fn metric(output: &mut String, name: &str, help: &str, value: u64) {
 
 #[cfg(test)]
 mod tests {
-    use super::render_journal_metrics;
+    use super::{StructuredLog, render_journal_metrics, span_context};
     use crate::reasoning::{journal::JournalEvent, storage::JournalStore};
 
     #[test]
@@ -202,5 +259,19 @@ mod tests {
         assert!(!metrics.contains("secret-incident-id"));
         assert!(!metrics.contains("incident_id="));
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn telemetry_rejects_uncontrolled_labels_and_keeps_ids_out_of_metrics() {
+        // Given a structured lifecycle event and an attacker-controlled phase.
+        let event = StructuredLog::new("provider.finish", "incident-1", "run-1", Some("reasoning"));
+        let rejected = StructuredLog::new("provider.finish", "incident-1", "run-1", Some("query"));
+
+        // When telemetry fields are constructed.
+        // Then only controlled phases produce logs or spans.
+        assert!(event.is_some());
+        assert!(rejected.is_none());
+        assert!(span_context("provider", "reasoning").is_some());
+        assert!(span_context("provider", "query").is_none());
     }
 }
