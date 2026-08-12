@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use super::{
     budget::{BudgetError, BudgetState, Reservation},
-    router::{ProviderKind, ProviderOrder, next_provider_in},
+    router::{ProviderAdmission, ProviderKind, ProviderOrder, next_provider_in},
 };
 
 /// Configurable inputs for one incident reasoning run.
@@ -19,6 +19,9 @@ use super::{
 pub struct ReasoningConfig {
     /// Provider fallback order for complete restarts.
     pub provider_order: ProviderOrder,
+    /// Providers that have passed independent authentication, pricing, and live gates.
+    #[serde(default = "default_admitted_providers")]
+    pub admitted_providers: Vec<ProviderKind>,
     /// Per-incident resource ceilings.
     pub budget: super::budget::BudgetConfig,
     /// Maximum model-directed context turns per provider run.
@@ -30,10 +33,15 @@ const fn default_tool_turns() -> u32 {
     4
 }
 
+fn default_admitted_providers() -> Vec<ProviderKind> {
+    ProviderOrder::default().providers
+}
+
 impl Default for ReasoningConfig {
     fn default() -> Self {
         Self {
             provider_order: ProviderOrder::default(),
+            admitted_providers: default_admitted_providers(),
             budget: super::budget::BudgetConfig::default(),
             max_tool_turns: default_tool_turns(),
         }
@@ -116,6 +124,7 @@ pub enum CoordinatorError {
 #[derive(Debug, Clone)]
 pub struct ReasoningRun {
     order: ProviderOrder,
+    admission: ProviderAdmission,
     budget: BudgetState,
     attempted: BTreeSet<ProviderKind>,
     active: Option<ProviderKind>,
@@ -130,8 +139,20 @@ impl ReasoningRun {
             .provider_order
             .validate()
             .map_err(CoordinatorError::InvalidOrder)?;
+        let admission = ProviderAdmission::new(config.admitted_providers);
+        if !config
+            .provider_order
+            .providers
+            .iter()
+            .any(|provider| admission.allows(*provider))
+        {
+            return Err(CoordinatorError::InvalidOrder(
+                "provider admission set cannot be empty",
+            ));
+        }
         Ok(Self {
             order: config.provider_order,
+            admission,
             budget: BudgetState::new(config.budget),
             attempted: BTreeSet::new(),
             active: None,
@@ -151,7 +172,9 @@ impl ReasoningRun {
         if self.active.is_some() {
             return Err(CoordinatorError::NoActiveRun);
         }
-        let Some(provider) = next_provider_in(&self.attempted, &self.order) else {
+        let Some(provider) = self.order.providers.iter().copied().find(|provider| {
+            !self.attempted.contains(provider) && self.admission.allows(*provider)
+        }) else {
             self.status = Some(RunStatus::Exhausted);
             return Ok(None);
         };

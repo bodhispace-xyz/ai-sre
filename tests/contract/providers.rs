@@ -281,6 +281,7 @@ fn coordinator_reserves_before_each_restart_and_ends_in_baseline() {
         provider_order: ProviderOrder {
             providers: vec![ProviderKind::OpenAi, ProviderKind::Deterministic],
         },
+        admitted_providers: vec![ProviderKind::OpenAi, ProviderKind::Deterministic],
         budget: BudgetConfig {
             max_provider_calls: 2,
             ..BudgetConfig::default()
@@ -614,6 +615,7 @@ fn incident_runtime_emits_evidence_attempt_and_terminal_journal_facts() {
         provider_order: ProviderOrder {
             providers: vec![ProviderKind::Deterministic],
         },
+        admitted_providers: vec![ProviderKind::Deterministic],
         budget: BudgetConfig::default(),
         max_tool_turns: 4,
     };
@@ -865,6 +867,26 @@ fn bootstrap_rejects_zero_process_limits_before_assembling_adapters() {
     // Then it fails closed without constructing external clients.
     assert_eq!(result, Err(ConfigError::ZeroLimit));
     assert!(bootstrap::build(config).is_err());
+}
+
+#[test]
+fn reasoning_rejects_an_empty_provider_admission_set() {
+    // Given a provider order with no independently qualified providers.
+    let config = ReasoningConfig {
+        admitted_providers: Vec::new(),
+        ..ReasoningConfig::default()
+    };
+
+    // When the reasoning coordinator is assembled.
+    let result = ReasoningRun::new(config);
+
+    // Then no provider can run without an explicit live gate.
+    assert!(matches!(
+        result,
+        Err(CoordinatorError::InvalidOrder(
+            "provider admission set cannot be empty"
+        ))
+    ));
 }
 
 #[test]
