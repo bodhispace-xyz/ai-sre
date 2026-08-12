@@ -109,3 +109,26 @@ pub fn render_message(result: &InvestigationResult) -> String {
         result.evidence_ids.len()
     )
 }
+
+#[cfg(test)]
+mod tests {
+    use super::NtfyConfig;
+
+    #[test]
+    fn ntfy_config_allows_one_publish_topic_only() {
+        // Given a server-owned HTTPS endpoint and topic.
+        let valid = NtfyConfig {
+            endpoint: "https://ntfy.example".to_owned(),
+            topic: "ai-sre".to_owned(),
+        };
+        let invalid = NtfyConfig {
+            endpoint: "http://ntfy.example".to_owned(),
+            topic: "other/topic".to_owned(),
+        };
+
+        // When notification configuration crosses the publisher boundary.
+        // Then only the bounded publish destination is accepted.
+        assert!(valid.is_valid());
+        assert!(!invalid.is_valid());
+    }
+}
