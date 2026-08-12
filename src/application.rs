@@ -25,7 +25,7 @@ use crate::{
     },
     bootstrap,
     config::AppConfig,
-    observability::{MetricsSnapshot, StructuredLog},
+    observability::{MetricsSnapshot, StructuredLog, span_context},
     reasoning::{
         budget::Reservation,
         dispatcher::IncidentDispatcher,
@@ -199,6 +199,9 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                 ) {
                     log.emit();
                 }
+                if let Some(span) = span_context("incident.investigation", "investigation") {
+                    span.emit();
+                }
                 let global_budget_admitted = reserve_paid_budget(
                     dispatcher.journal_mut(),
                     &run_id,
@@ -244,6 +247,9 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                     Some("reasoning"),
                 ) {
                     log.emit();
+                }
+                if let Some(span) = span_context("incident.reasoning", "reasoning") {
+                    span.emit();
                 }
                 if paid_provider_count > 0 && global_budget_admitted {
                     let actual_cost = runtime.journal().project();

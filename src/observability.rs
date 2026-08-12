@@ -76,6 +76,17 @@ pub struct SpanContext {
     pub phase: String,
 }
 
+impl SpanContext {
+    /// Emits a bounded span boundary without exporting payloads or queries.
+    pub fn emit(&self) {
+        eprintln!(
+            "{{\"span\":\"{}\",\"phase\":\"{}\"}}",
+            escape_json(&self.name),
+            escape_json(&self.phase)
+        );
+    }
+}
+
 /// Creates a span context only for an allowlisted phase.
 pub fn span_context(name: &str, phase: &str) -> Option<SpanContext> {
     ALLOWED_PHASES.contains(&phase).then(|| SpanContext {
