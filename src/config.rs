@@ -12,6 +12,7 @@ use std::{
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+use crate::policy::promotion::ShadowGatePolicy;
 use crate::reasoning::{budget::BudgetConfig, coordinator::ReasoningConfig, router::ProviderOrder};
 
 /// Complete non-secret configuration required to assemble the application.
@@ -147,6 +148,13 @@ impl AppConfig {
 
     /// Rejects unsafe values before adapters or credentials are assembled.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        let shadow_policy =
+            ShadowGatePolicy::from_yaml(include_str!("../config/evaluation/shadow-gate.yaml"))
+                .map_err(|_| ConfigError::InvalidProviderOrder)?;
+        if !shadow_policy.action_policy_disabled || !shadow_policy.external_write_credentials_absent
+        {
+            return Err(ConfigError::InvalidProviderOrder);
+        }
         if self.openai_cache_path.as_os_str().is_empty()
             || self.gcx_binary.as_os_str().is_empty()
             || self.grafana.logs_datasource.trim().is_empty()

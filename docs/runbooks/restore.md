@@ -7,6 +7,7 @@ with the external restore epoch and all mutation credentials absent.
 
 The restored instance must enter quarantine. It may serve read-only reports and
 replay evidence, but it must not resume pending approvals, dispatch work, or
-load a write credential. An operator must reconcile the epoch and journal
-through the later supervised-recovery gate; a restart or missing epoch never
-clears quarantine.
+load a write credential. Promotion manifests are re-verified against the
+restored image/config/corpus binding; a restart or missing epoch never clears
+quarantine or reconstructs a verifier receipt. An operator must reconcile the
+epoch and journal through the later supervised-recovery gate.

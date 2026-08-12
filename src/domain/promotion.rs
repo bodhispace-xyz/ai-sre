@@ -1,25 +1,26 @@
-//! Versioned promotion-manifest domain types.
+//! Typed promotion-manifest values and the verifier-owned trust boundary.
 //!
-//! A manifest is evidence of an offline decision; it is never a substitute
-//! for signature verification. The policy module accepts it only after the
-//! deployment verifier has established that the signature is valid.
+//! Deserialized manifests are untrusted data. Only a verifier-owned receipt
+//! can produce `VerifiedPromotionManifest`, which is the only value accepted
+//! by runtime admission policy.
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-/// The three ordered promotion gates.
+/// The ordered promotion gates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Gate {
-    /// Shadow quality and deterministic fallback gate.
+    /// Shadow quality gate.
     A,
-    /// Supervised mutation readiness gate.
+    /// Supervised mutation gate.
     B,
-    /// External GitHub proposal-write gate.
+    /// GitHub proposal gate.
     C,
 }
 
-/// Canonical, signed promotion-manifest payload.
+/// Untrusted wire representation of a promotion manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PromotionManifest {
@@ -27,66 +28,98 @@ pub struct PromotionManifest {
     pub schema: String,
     /// Gate represented by this manifest.
     pub gate: Gate,
-    /// Digest of the canonical payload and result bundle.
+    /// Digest of the canonical payload, derived outside that payload.
     pub manifest_digest: String,
-    /// Digest of the immediately preceding gate, when one exists.
+    /// Digest of the immediately preceding verified gate.
     pub predecessor_digest: Option<String>,
     /// Frozen replay corpus digest.
     pub corpus_digest: String,
     /// Digest of measured gate results.
     pub results_digest: String,
-    /// Version of the policy evaluated by the operator.
+    /// Version of evaluated policy.
     pub policy_version: String,
-    /// Version of the non-secret deployment configuration.
+    /// Version of deployment configuration.
     pub config_version: String,
-    /// Immutable application image or binary digest.
+    /// Immutable image or binary digest.
     pub binary_digest: String,
-    /// Unix timestamp at which the manifest became valid.
+    /// Unix issue time.
     pub issued_at: i64,
-    /// Unix timestamp after which the manifest must not grant authority.
+    /// Unix expiry time.
     pub expires_at: i64,
     /// Offline signing key identifier.
     pub key_id: String,
-    /// Monotonically increasing trust-root generation.
+    /// Trust-root generation.
     pub generation: u64,
-    /// Revocation is explicit and fail-closed.
+    /// Explicit revocation marker.
     pub revoked: bool,
-    /// Set only by the pinned offline verifier, never by deserialization.
-    #[serde(skip)]
-    pub signature_verified: bool,
+}
+
+/// Verifier-owned receipt. Its private field prevents callers from forging it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifierReceipt {
+    verified: (),
+}
+
+impl VerifierReceipt {
+    /// Creates a receipt only for an offline verifier implementation.
+    #[allow(dead_code)]
+    pub(crate) const fn verified() -> Self {
+        Self { verified: () }
+    }
+}
+
+/// A manifest whose signature and trust-root binding were verified.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedPromotionManifest {
+    manifest: PromotionManifest,
+    receipt: VerifierReceipt,
+}
+
+impl VerifiedPromotionManifest {
+    /// Constructs a verified value from a verifier-owned receipt.
+    #[allow(dead_code)]
+    pub(crate) fn from_receipt(manifest: PromotionManifest, receipt: VerifierReceipt) -> Self {
+        Self { manifest, receipt }
+    }
+
+    /// Returns the verified manifest data for policy binding.
+    pub fn manifest(&self) -> &PromotionManifest {
+        &self.manifest
+    }
+
+    /// Returns the digest used to identify this admitted gate.
+    pub fn digest(&self) -> &str {
+        &self.manifest.manifest_digest
+    }
 }
 
 /// Errors returned when a manifest cannot be admitted.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PromotionError {
-    /// A field is empty or has the wrong shape.
+    /// A field is empty or malformed.
     #[error("promotion manifest has invalid fields")]
     InvalidFields,
-    /// The manifest is not valid at the supplied clock time.
+    /// The manifest is outside its validity interval.
     #[error("promotion manifest is expired or not yet valid")]
     NotCurrent,
-    /// The signer has been revoked or the signature was not verified.
+    /// The signature, key, or revocation state is not trusted.
     #[error("promotion manifest signature is not trusted")]
     UntrustedSignature,
-    /// The manifest does not bind to the running deployment.
+    /// The manifest does not match the running deployment.
     #[error("promotion manifest does not match the running deployment")]
     BindingMismatch,
-    /// A gate skipped an earlier required gate.
+    /// The gate chain is missing or skips its predecessor.
     #[error("promotion predecessor is missing or incorrect")]
     InvalidPredecessor,
 }
 
 impl PromotionManifest {
-    /// Returns the canonical JSON payload covered by the offline signature.
-    ///
-    /// Signature metadata and the in-memory verification bit are deliberately
-    /// excluded, so a deserialized document cannot self-authorize.
+    /// Returns canonical JSON bytes excluding the derived manifest digest.
     pub fn canonical_payload(&self) -> Vec<u8> {
         #[derive(Serialize)]
         struct Payload<'a> {
             schema: &'a str,
             gate: Gate,
-            manifest_digest: &'a str,
             predecessor_digest: Option<&'a str>,
             corpus_digest: &'a str,
             results_digest: &'a str,
@@ -102,7 +135,6 @@ impl PromotionManifest {
         serde_json::to_vec(&Payload {
             schema: &self.schema,
             gate: self.gate,
-            manifest_digest: &self.manifest_digest,
             predecessor_digest: self.predecessor_digest.as_deref(),
             corpus_digest: &self.corpus_digest,
             results_digest: &self.results_digest,
@@ -115,12 +147,26 @@ impl PromotionManifest {
             generation: self.generation,
             revoked: self.revoked,
         })
-        .expect("promotion payload contains only serializable fields")
+        .expect("canonical payload is serializable")
     }
 
-    /// Validates shape and gate-independent invariants.
+    /// Computes the identity of the exact canonical payload.
+    pub fn derived_digest(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(self.canonical_payload());
+        let bytes = hasher.finalize();
+        format!(
+            "sha256:{}",
+            bytes
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>()
+        )
+    }
+
+    /// Validates shape and the derived manifest identity.
     pub fn validate_shape(&self) -> Result<(), PromotionError> {
-        let nonempty = [
+        let fields = [
             &self.schema,
             &self.manifest_digest,
             &self.corpus_digest,
@@ -131,31 +177,35 @@ impl PromotionManifest {
             &self.key_id,
         ];
         if self.schema != "KTD21/v1"
-            || nonempty.iter().any(|value| value.trim().is_empty())
+            || fields.iter().any(|v| v.trim().is_empty())
             || self.issued_at >= self.expires_at
             || self.generation == 0
-            || !self.manifest_digest.starts_with("sha256:")
-            || !self.corpus_digest.starts_with("sha256:")
-            || !self.results_digest.starts_with("sha256:")
-            || !self.binary_digest.starts_with("sha256:")
+            || self.manifest_digest != self.derived_digest()
+            || !valid_digest(&self.corpus_digest)
+            || !valid_digest(&self.results_digest)
+            || !valid_digest(&self.binary_digest)
         {
             return Err(PromotionError::InvalidFields);
         }
-        if self.gate == Gate::A && self.predecessor_digest.is_some() {
-            return Err(PromotionError::InvalidPredecessor);
+        match (self.gate, self.predecessor_digest.as_deref()) {
+            (Gate::A, None) => Ok(()),
+            (Gate::A, Some(_)) => Err(PromotionError::InvalidPredecessor),
+            (_, Some(value)) if valid_digest(value) => Ok(()),
+            _ => Err(PromotionError::InvalidPredecessor),
         }
-        if self.gate != Gate::A && self.predecessor_digest.as_deref().is_none_or(str::is_empty) {
-            return Err(PromotionError::InvalidPredecessor);
-        }
-        if self
-            .predecessor_digest
-            .as_deref()
-            .is_some_and(|digest| !digest.starts_with("sha256:"))
-        {
-            return Err(PromotionError::InvalidPredecessor);
-        }
-        Ok(())
     }
+}
+
+fn valid_digest(value: &str) -> bool {
+    let Some(hex) = value.strip_prefix("sha256:") else {
+        return false;
+    };
+    hex.len() == 64 && hex.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+#[cfg(test)]
+pub(crate) fn test_verified(manifest: PromotionManifest) -> VerifiedPromotionManifest {
+    VerifiedPromotionManifest::from_receipt(manifest, VerifierReceipt::verified())
 }
 
 #[cfg(test)]
@@ -163,37 +213,39 @@ mod tests {
     use super::{Gate, PromotionManifest};
 
     fn fixture() -> PromotionManifest {
-        PromotionManifest {
+        let mut manifest = PromotionManifest {
             schema: "KTD21/v1".into(),
             gate: Gate::A,
-            manifest_digest: "sha256:manifest".into(),
+            manifest_digest: String::new(),
             predecessor_digest: None,
-            corpus_digest: "sha256:corpus".into(),
-            results_digest: "sha256:results".into(),
+            corpus_digest:
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into(),
+            results_digest:
+                "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".into(),
             policy_version: "policy-1".into(),
             config_version: "config-1".into(),
-            binary_digest: "sha256:image".into(),
+            binary_digest:
+                "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".into(),
             issued_at: 1,
             expires_at: 2,
             key_id: "key-1".into(),
             generation: 1,
             revoked: false,
-            signature_verified: true,
-        }
+        };
+        manifest.manifest_digest = manifest.derived_digest();
+        manifest
     }
 
     #[test]
-    fn canonical_payload_excludes_verification_state() {
-        // Given a manifest that has already been verified in memory.
-        let mut manifest = fixture();
-        let signed = manifest.canonical_payload();
-
-        // When deserialization creates a fresh manifest from its JSON form.
-        manifest.signature_verified = false;
-        let unsigned = manifest.canonical_payload();
-
-        // Then signature bytes are independent of mutable trust state.
-        assert_eq!(signed, unsigned);
-        assert!(!String::from_utf8_lossy(&signed).contains("signature_verified"));
+    fn canonical_payload_excludes_derived_identity() {
+        // Given a valid manifest whose identity is derived from canonical bytes.
+        let manifest = fixture();
+        // When canonical bytes are hashed.
+        let digest = manifest.derived_digest();
+        // Then the identity is stable and not self-referential.
+        assert_eq!(digest, manifest.manifest_digest);
+        assert!(
+            !String::from_utf8_lossy(&manifest.canonical_payload()).contains("manifest_digest")
+        );
     }
 }

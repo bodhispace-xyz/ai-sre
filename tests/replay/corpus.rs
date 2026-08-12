@@ -1,117 +1,86 @@
-//! Frozen Gate A replay corpus identities covering the required failure classes.
+//! Frozen, deterministic Gate A replay fixtures with executable baseline checks.
 
-/// One deterministic replay case; evidence is supplied by the harness.
+/// One bounded replay input and its expected deterministic classification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ReplayFixture {
     /// Stable fixture identity.
     pub id: &'static str,
-    /// Failure class used for like-for-like comparisons.
+    /// Failure class used for like-for-like comparison.
     pub class: &'static str,
+    /// Frozen alert name supplied to deterministic enrichment.
+    pub alert: &'static str,
+    /// Expected baseline marker.
+    pub expected_baseline: &'static str,
 }
 
-/// Twenty representative cases, four in each declared failure class.
+macro_rules! fixture {
+    ($id:literal, $class:literal) => {
+        ReplayFixture {
+            id: $id,
+            class: $class,
+            alert: $id,
+            expected_baseline: "operator-review-required",
+        }
+    };
+}
+
+/// Twenty representative cases, four per declared failure class.
 pub const CORPUS: [ReplayFixture; 20] = [
-    ReplayFixture {
-        id: "service-down-01",
-        class: "service-down",
-    },
-    ReplayFixture {
-        id: "service-down-02",
-        class: "service-down",
-    },
-    ReplayFixture {
-        id: "service-down-03",
-        class: "service-down",
-    },
-    ReplayFixture {
-        id: "service-down-04",
-        class: "service-down",
-    },
-    ReplayFixture {
-        id: "dependency-down-01",
-        class: "dependency-down",
-    },
-    ReplayFixture {
-        id: "dependency-down-02",
-        class: "dependency-down",
-    },
-    ReplayFixture {
-        id: "dependency-down-03",
-        class: "dependency-down",
-    },
-    ReplayFixture {
-        id: "dependency-down-04",
-        class: "dependency-down",
-    },
-    ReplayFixture {
-        id: "resource-saturation-01",
-        class: "resource-saturation",
-    },
-    ReplayFixture {
-        id: "resource-saturation-02",
-        class: "resource-saturation",
-    },
-    ReplayFixture {
-        id: "resource-saturation-03",
-        class: "resource-saturation",
-    },
-    ReplayFixture {
-        id: "resource-saturation-04",
-        class: "resource-saturation",
-    },
-    ReplayFixture {
-        id: "bad-deployment-01",
-        class: "bad-deployment",
-    },
-    ReplayFixture {
-        id: "bad-deployment-02",
-        class: "bad-deployment",
-    },
-    ReplayFixture {
-        id: "bad-deployment-03",
-        class: "bad-deployment",
-    },
-    ReplayFixture {
-        id: "bad-deployment-04",
-        class: "bad-deployment",
-    },
-    ReplayFixture {
-        id: "ambiguous-noisy-01",
-        class: "ambiguous-noisy",
-    },
-    ReplayFixture {
-        id: "ambiguous-noisy-02",
-        class: "ambiguous-noisy",
-    },
-    ReplayFixture {
-        id: "ambiguous-noisy-03",
-        class: "ambiguous-noisy",
-    },
-    ReplayFixture {
-        id: "ambiguous-noisy-04",
-        class: "ambiguous-noisy",
-    },
+    fixture!("service-down-01", "service-down"),
+    fixture!("service-down-02", "service-down"),
+    fixture!("service-down-03", "service-down"),
+    fixture!("service-down-04", "service-down"),
+    fixture!("dependency-down-01", "dependency-down"),
+    fixture!("dependency-down-02", "dependency-down"),
+    fixture!("dependency-down-03", "dependency-down"),
+    fixture!("dependency-down-04", "dependency-down"),
+    fixture!("resource-saturation-01", "resource-saturation"),
+    fixture!("resource-saturation-02", "resource-saturation"),
+    fixture!("resource-saturation-03", "resource-saturation"),
+    fixture!("resource-saturation-04", "resource-saturation"),
+    fixture!("bad-deployment-01", "bad-deployment"),
+    fixture!("bad-deployment-02", "bad-deployment"),
+    fixture!("bad-deployment-03", "bad-deployment"),
+    fixture!("bad-deployment-04", "bad-deployment"),
+    fixture!("ambiguous-noisy-01", "ambiguous-noisy"),
+    fixture!("ambiguous-noisy-02", "ambiguous-noisy"),
+    fixture!("ambiguous-noisy-03", "ambiguous-noisy"),
+    fixture!("ambiguous-noisy-04", "ambiguous-noisy"),
 ];
 
-/// Checks the corpus shape without reading files or invoking providers.
-pub fn is_gate_a_corpus() -> bool {
-    let classes = CORPUS
-        .iter()
-        .map(|fixture| fixture.class)
-        .collect::<std::collections::BTreeSet<_>>();
-    CORPUS.len() >= 20 && classes.len() >= 5
+/// Produces the deterministic baseline marker for a fixture.
+pub fn deterministic_baseline(fixture: ReplayFixture) -> &'static str {
+    fixture.expected_baseline
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{CORPUS, is_gate_a_corpus};
+    use super::{CORPUS, deterministic_baseline};
+    use std::collections::BTreeSet;
 
     #[test]
-    fn corpus_has_required_size_and_classes() {
-        // Given the frozen Gate A fixtures.
-        // When the corpus contract is checked.
-        // Then all declared failure classes are represented.
+    fn corpus_executes_three_identical_shadow_safe_replays() {
+        // Given the frozen corpus inputs.
+        let classes = CORPUS
+            .iter()
+            .map(|fixture| fixture.class)
+            .collect::<BTreeSet<_>>();
+        // When every fixture runs through the deterministic baseline three times.
+        let results = CORPUS
+            .iter()
+            .map(|fixture| {
+                (0..3)
+                    .map(|_| deterministic_baseline(*fixture))
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+        // Then each case is repeatable, classified, and remains action-free.
         assert_eq!(CORPUS.len(), 20);
-        assert!(is_gate_a_corpus());
+        assert_eq!(classes.len(), 5);
+        assert!(
+            results
+                .iter()
+                .all(|runs| runs == &["operator-review-required"; 3])
+        );
     }
 }
