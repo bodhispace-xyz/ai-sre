@@ -24,6 +24,7 @@ use crate::observability::MetricsSnapshot;
 use crate::reasoning::incident::{
     AlertmanagerWebhook, IncidentSignal, normalize_webhook, validate_webhook,
 };
+use crate::web::incidents::IncidentPages;
 
 /// The only HTTP route exposed by this intake.
 pub const ALERTMANAGER_PATH: &str = "/webhooks/alertmanager";
@@ -89,6 +90,7 @@ struct IntakeState {
     intake: AlertIntake,
     sender: mpsc::Sender<IntakeCommand>,
     metrics: MetricsSnapshot,
+    pages: IncidentPages,
 }
 
 /// Bounded Alertmanager webhook listener.
@@ -191,21 +193,63 @@ impl AlertIntake {
         sender: mpsc::Sender<IntakeCommand>,
         metrics: MetricsSnapshot,
     ) -> Result<(), IntakeError> {
+        self.serve_with_metrics_and_pages(listener, sender, metrics, IncidentPages::default())
+            .await
+    }
+
+    /// Serves intake, metrics, and authenticated read-only incident reports.
+    pub async fn serve_with_metrics_and_pages(
+        self,
+        listener: TcpListener,
+        sender: mpsc::Sender<IntakeCommand>,
+        metrics: MetricsSnapshot,
+        pages: IncidentPages,
+    ) -> Result<(), IntakeError> {
         let max_body_bytes = self.config.max_body_bytes;
         let state = IntakeState {
             intake: self,
             sender,
             metrics,
+            pages,
         };
         let app = Router::new()
             .route(ALERTMANAGER_PATH, post(handle_webhook))
             .route("/metrics", get(handle_metrics))
+            .route("/incidents/{incident_id}", get(handle_incident))
             .with_state(state)
             .layer(axum::extract::DefaultBodyLimit::max(max_body_bytes));
         axum::serve(listener, app)
             .await
             .map_err(|_| IntakeError::Io)
     }
+}
+
+async fn handle_incident(
+    State(state): State<IntakeState>,
+    axum::extract::Path(incident_id): axum::extract::Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if authenticate(&state.intake, &headers).is_err() {
+        return response_with_close(StatusCode::UNAUTHORIZED);
+    }
+    let Some(rendered) = state.pages.get(&incident_id).await else {
+        return response_with_close(StatusCode::NOT_FOUND);
+    };
+    let mut response = rendered.into_response();
+    *response.status_mut() = StatusCode::OK;
+    for (name, value) in crate::web::incidents::SECURITY_HEADERS {
+        if let (Ok(name), Ok(value)) = (
+            axum::http::HeaderName::try_from(*name),
+            axum::http::HeaderValue::try_from(*value),
+        ) {
+            response.headers_mut().insert(name, value);
+        }
+    }
+    response.headers_mut().insert(
+        axum::http::header::CONTENT_TYPE,
+        axum::http::HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    response
 }
 
 async fn handle_metrics(State(state): State<IntakeState>, headers: HeaderMap) -> Response {

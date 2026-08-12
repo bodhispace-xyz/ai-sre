@@ -504,6 +504,43 @@ impl IncidentDispatcher {
         }
         Ok(())
     }
+
+    /// Commits completion, notification intent, and the redacted page together.
+    pub fn mark_completed_with_report(
+        &mut self,
+        incident_id: &str,
+        outbox: Option<OutboxMessage>,
+        report: super::storage::StoredReport,
+    ) -> Result<(), DispatchError> {
+        self.journal.append_with_outbox_and_report(
+            &[JournalEvent::IncidentCompleted {
+                incident_id: incident_id.to_owned(),
+            }],
+            outbox.as_ref(),
+            &report,
+        )?;
+        let key = correlation_key(incident_id);
+        if let Some(LifecycleState::Firing {
+            episode,
+            last_event_time,
+            last_event_time_ms,
+            last_source_event_id,
+            ..
+        }) = self.lifecycle.get(&key)
+        {
+            self.lifecycle.insert(
+                key,
+                LifecycleState::Firing {
+                    episode: *episode,
+                    completed: true,
+                    last_event_time: last_event_time.clone(),
+                    last_event_time_ms: *last_event_time_ms,
+                    last_source_event_id: last_source_event_id.clone(),
+                },
+            );
+        }
+        Ok(())
+    }
 }
 
 fn correlation_key(incident_id: &str) -> String {

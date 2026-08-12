@@ -902,6 +902,90 @@ fn reasoning_rejects_an_empty_provider_admission_set() {
 }
 
 #[test]
+fn notification_outbox_is_idempotent_and_delivery_ack_is_one_shot() {
+    // Given one durable report event and a stable notification delivery identity.
+    let path = std::env::temp_dir().join(format!(
+        "ai-sre-outbox-{}-{}.sqlite",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut store = ai_sre::reasoning::storage::JournalStore::open(&path).expect("journal");
+    let message = ai_sre::reasoning::storage::OutboxMessage {
+        delivery_id: "incident-1:report".to_owned(),
+        body: "bounded report".to_owned(),
+    };
+
+    // When the transaction is retried and delivery is acknowledged twice.
+    store
+        .append_with_outbox(&[], Some(&message))
+        .expect("first outbox insert");
+    store
+        .append_with_outbox(&[], Some(&message))
+        .expect("idempotent retry");
+    assert_eq!(store.pending_outbox().expect("pending").len(), 1);
+    assert!(
+        store
+            .mark_outbox_delivered(&message.delivery_id, 10)
+            .expect("ack")
+    );
+    assert!(
+        !store
+            .mark_outbox_delivered(&message.delivery_id, 11)
+            .expect("duplicate ack")
+    );
+    assert!(
+        store
+            .pending_outbox()
+            .expect("pending after ack")
+            .is_empty()
+    );
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
+fn completed_report_snapshot_survives_store_reopen() {
+    // Given a completed incident committed with its redacted page snapshot.
+    let path = std::env::temp_dir().join(format!(
+        "ai-sre-report-{}-{}.sqlite",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock")
+            .as_nanos()
+    ));
+    let _ = std::fs::remove_file(&path);
+    let mut store = ai_sre::reasoning::storage::JournalStore::open(&path).expect("journal");
+    store
+        .append_with_outbox_and_report(
+            &[
+                ai_sre::reasoning::journal::JournalEvent::IncidentCompleted {
+                    incident_id: "incident-1".to_owned(),
+                },
+            ],
+            None,
+            &ai_sre::reasoning::storage::StoredReport {
+                incident_id: "incident-1".to_owned(),
+                html: "<html>redacted</html>".to_owned(),
+            },
+        )
+        .expect("commit report");
+
+    // When the process reopens the same SQLite journal.
+    drop(store);
+    let reopened = ai_sre::reasoning::storage::JournalStore::open(&path).expect("reopen");
+    let reports = reopened.stored_reports(256).expect("reports");
+
+    // Then the operator page can be rebuilt without the original process memory.
+    assert_eq!(reports[0].incident_id, "incident-1");
+    assert_eq!(reports[0].html, "<html>redacted</html>");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn bootstrap_rejects_relative_gcx_binary_paths() {
     // Given a GCX path that would only resolve relative to the service cwd.
     let config = AppConfig {

@@ -43,6 +43,15 @@ pub struct OutboxMessage {
     pub body: String,
 }
 
+/// Durable redacted HTML report used to rebuild the operator page after restart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredReport {
+    /// Stable incident identity.
+    pub incident_id: String,
+    /// Already-rendered, escaped and redacted report page.
+    pub html: String,
+}
+
 /// SQLite journal store with deterministic replay and a transactional outbox.
 pub struct JournalStore {
     path: PathBuf,
@@ -87,6 +96,10 @@ impl JournalStore {
                 delivery_id TEXT PRIMARY KEY,
                 body TEXT NOT NULL,
                 delivered_at_ms INTEGER
+             );
+             CREATE TABLE IF NOT EXISTS incident_reports (
+                incident_id TEXT PRIMARY KEY,
+                html TEXT NOT NULL
              );
              CREATE TABLE IF NOT EXISTS journal_markers (
                 key TEXT PRIMARY KEY,
@@ -313,6 +326,60 @@ impl JournalStore {
             });
         }
         Ok(())
+    }
+
+    /// Commits lifecycle facts, notification intent, and a redacted page atomically.
+    pub fn append_with_outbox_and_report(
+        &mut self,
+        events: &[JournalEvent],
+        outbox: Option<&OutboxMessage>,
+        report: &StoredReport,
+    ) -> Result<(), JournalStoreError> {
+        let start = self.journal.entries().len() as u64;
+        let transaction = self.connection.transaction()?;
+        for (offset, event) in events.iter().enumerate() {
+            transaction.execute(
+                "INSERT INTO journal_events(sequence, event_json, incident_id, run_id) VALUES (?1, ?2, NULL, NULL)",
+                params![
+                    i64::try_from(start + offset as u64).map_err(|_| rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other("sequence overflow"))))?,
+                    serde_json::to_string(event)?
+                ],
+            )?;
+        }
+        if let Some(message) = outbox {
+            transaction.execute(
+                "INSERT INTO notification_outbox(delivery_id, body, delivered_at_ms) VALUES (?1, ?2, NULL) ON CONFLICT(delivery_id) DO NOTHING",
+                params![message.delivery_id, message.body],
+            )?;
+        }
+        transaction.execute(
+            "INSERT INTO incident_reports(incident_id, html) VALUES (?1, ?2) ON CONFLICT(incident_id) DO UPDATE SET html = excluded.html",
+            params![report.incident_id, report.html],
+        )?;
+        transaction.commit()?;
+        for (offset, event) in events.iter().cloned().enumerate() {
+            self.journal.restore(JournalEntry {
+                sequence: start + offset as u64,
+                context: None,
+                event,
+            });
+        }
+        Ok(())
+    }
+
+    /// Loads the newest durable reports for page hydration.
+    pub fn stored_reports(&self, limit: usize) -> Result<Vec<StoredReport>, JournalStoreError> {
+        let mut statement = self.connection.prepare(
+            "SELECT incident_id, html FROM incident_reports ORDER BY rowid DESC LIMIT ?1",
+        )?;
+        let rows =
+            statement.query_map(params![i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+                Ok(StoredReport {
+                    incident_id: row.get(0)?,
+                    html: row.get(1)?,
+                })
+            })?;
+        Ok(rows.collect::<Result<Vec<_>, _>>()?)
     }
 
     /// Reserves one worst-case cost atomically across all configured scopes.

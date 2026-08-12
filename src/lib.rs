@@ -2,6 +2,7 @@
 
 pub mod reasoning;
 pub mod transport;
+pub mod web;
 
 /// Vendor and process adapters kept outside the provider-neutral core.
 pub mod adapters;
