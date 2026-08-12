@@ -12,6 +12,7 @@ pub mod journal;
 pub mod live;
 pub mod prompts;
 pub mod recorded;
+pub mod replay;
 pub mod roles;
 pub mod router;
 pub mod runtime;
