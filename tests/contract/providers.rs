@@ -160,6 +160,18 @@ fn diagnostic_report_rejects_missing_evidence() {
 }
 
 #[test]
+fn provider_report_payload_is_bounded_before_json_parsing() {
+    // Given provider output larger than the report contract permits.
+    let input = "x".repeat(ai_sre::reasoning::contracts::MAX_PROVIDER_REPORT_BYTES + 1);
+
+    // When the untrusted response crosses the provider-neutral parser.
+    let result = DiagnosticReport::from_provider_json(&input);
+
+    // Then parsing fails closed before deserialization can consume it.
+    assert_eq!(result, Err(ContractError::MalformedProviderResponse));
+}
+
+#[test]
 fn planner_recommendation_requires_verification_stop_and_rollback() {
     // Given a planner artifact with one valid citation but no stop strategy.
     let recommendation = AdvisoryRecommendation {

@@ -8,6 +8,9 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
+/// Maximum provider report JSON accepted before deserialization.
+pub const MAX_PROVIDER_REPORT_BYTES: usize = 64 * 1024;
+
 /// A citation to evidence already present on the immutable run-scoped board.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -101,6 +104,9 @@ impl DiagnosticReport {
     /// The parser deliberately erases provider-specific parse details so error
     /// messages cannot accidentally disclose response content or credentials.
     pub fn from_provider_json(input: &str) -> Result<Self, ContractError> {
+        if input.len() > MAX_PROVIDER_REPORT_BYTES {
+            return Err(ContractError::MalformedProviderResponse);
+        }
         serde_json::from_str(input).map_err(|_| ContractError::MalformedProviderResponse)
     }
 

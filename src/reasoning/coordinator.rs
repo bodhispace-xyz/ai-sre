@@ -10,7 +10,7 @@ use thiserror::Error;
 
 use super::{
     budget::{BudgetError, BudgetState, Reservation},
-    router::{ProviderAdmission, ProviderKind, ProviderOrder, next_provider_in},
+    router::{ProviderAdmission, ProviderKind, ProviderOrder},
 };
 
 /// Configurable inputs for one incident reasoning run.
@@ -199,7 +199,11 @@ impl ReasoningRun {
         if self.status.is_some() || self.active.is_some() {
             return None;
         }
-        next_provider_in(&self.attempted, &self.order)
+        self.order
+            .providers
+            .iter()
+            .copied()
+            .find(|provider| !self.attempted.contains(provider) && self.admission.allows(*provider))
     }
 
     /// Admits the deterministic baseline without model/tool reservation.
