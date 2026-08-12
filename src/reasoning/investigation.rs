@@ -454,7 +454,7 @@ async fn run_live_with_context(
                         .iter()
                         .map(|record| record.evidence_id.clone())
                         .collect::<BTreeSet<_>>();
-                    if report.validate_against(&evidence_ids).is_ok() {
+                    if super::validate::validate_report(&report, &evidence_ids, prompt).is_ok() {
                         let status = runtime.succeed_provider_with_report(
                             provider,
                             report,
