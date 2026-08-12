@@ -28,6 +28,22 @@ pub struct ProviderOrder {
     pub providers: Vec<ProviderKind>,
 }
 
+/// Identity of one complete, isolated provider reasoning run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProviderRun {
+    /// Provider selected for this complete run.
+    pub provider: ProviderKind,
+    /// Monotonic generation used to prevent mixed-run state.
+    pub generation: u32,
+}
+
+/// Pure fallback state that preserves attempted providers across restarts.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderRunState {
+    attempted: BTreeSet<ProviderKind>,
+    generation: u32,
+}
+
 impl Default for ProviderOrder {
     fn default() -> Self {
         Self {
@@ -69,4 +85,55 @@ pub fn next_provider_in(
         .iter()
         .copied()
         .find(|provider| !attempted.contains(provider))
+}
+
+impl ProviderRunState {
+    /// Starts the next complete provider run without reusing a prior provider.
+    pub fn start_next(&mut self, order: &ProviderOrder) -> Option<ProviderRun> {
+        let provider = next_provider_in(&self.attempted, order)?;
+        self.attempted.insert(provider);
+        self.generation = self.generation.saturating_add(1);
+        Some(ProviderRun {
+            provider,
+            generation: self.generation,
+        })
+    }
+
+    /// Returns whether a provider has already owned a complete run.
+    pub fn attempted(&self, provider: ProviderKind) -> bool {
+        self.attempted.contains(&provider)
+    }
+
+    /// Returns the current run generation.
+    pub const fn generation(&self) -> u32 {
+        self.generation
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProviderKind, ProviderOrder, ProviderRunState};
+
+    #[test]
+    fn fallback_restarts_with_a_fresh_provider_run_generation() {
+        // Given the configured OpenAI, Gemini, and deterministic fallback order.
+        let order = ProviderOrder {
+            providers: vec![
+                ProviderKind::OpenAi,
+                ProviderKind::Gemini,
+                ProviderKind::Deterministic,
+            ],
+        };
+        let mut state = ProviderRunState::default();
+
+        // When the first provider fails and the next run is selected.
+        let first = state.start_next(&order).expect("OpenAI run");
+        let second = state.start_next(&order).expect("Gemini run");
+
+        // Then the fallback cannot reuse provider state or generation identity.
+        assert_eq!(first.provider, ProviderKind::OpenAi);
+        assert_eq!(second.provider, ProviderKind::Gemini);
+        assert_ne!(first.generation, second.generation);
+        assert!(state.attempted(ProviderKind::OpenAi));
+    }
 }
