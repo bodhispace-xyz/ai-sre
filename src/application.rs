@@ -174,6 +174,7 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
                 let paid_provider_count = gemini.is_some() as u64 + deepseek.is_some() as u64;
                 let result = investigate_live(LiveInvestigationInput {
                     grafana: &application.grafana,
+                    read_only: Some(&application.read_only),
                     journal: dispatcher.journal_mut(),
                     signal: &incident,
                     run_id: &run_id,

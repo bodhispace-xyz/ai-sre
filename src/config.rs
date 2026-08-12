@@ -4,6 +4,7 @@
 //! resource limits, paths, provider order, and datasource identifiers.
 
 use std::{
+    collections::BTreeMap,
     fs,
     path::{Path, PathBuf},
 };
@@ -21,6 +22,8 @@ pub struct AppConfig {
     pub reasoning: ReasoningConfig,
     /// Grafana read-only context settings.
     pub grafana: GrafanaConfig,
+    /// Server-owned Git, deployment-history, and health context policy.
+    pub read_only: ReadOnlyConfig,
     /// OpenAI rotating refresh-token cache path.
     pub openai_cache_path: PathBuf,
     /// Pinned `gcx` executable path.
@@ -40,12 +43,38 @@ impl Default for AppConfig {
         Self {
             reasoning: ReasoningConfig::default(),
             grafana: GrafanaConfig::default(),
+            read_only: ReadOnlyConfig::default(),
             openai_cache_path: PathBuf::from("/var/lib/ai-sre/openai/auth.json"),
             gcx_binary: PathBuf::from("/usr/local/bin/gcx"),
             gcx_timeout_secs: 30,
             gcx_max_output_bytes: 1_048_576,
             gcx_max_query_bytes: 4_096,
             gcx_max_concurrency: 4,
+        }
+    }
+}
+
+/// Deployment-owned process and repository selectors for non-Grafana context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReadOnlyConfig {
+    /// Absolute Git executable path.
+    pub git_binary: PathBuf,
+    /// Absolute canonical Git repository root.
+    pub git_repository: String,
+    /// Absolute health adapter executable path.
+    pub health_binary: PathBuf,
+    /// Fixed health aliases and argument vectors.
+    pub health_commands: BTreeMap<String, Vec<String>>,
+}
+
+impl Default for ReadOnlyConfig {
+    fn default() -> Self {
+        Self {
+            git_binary: PathBuf::from("/usr/bin/git"),
+            git_repository: "/var/lib/ai-sre/git".to_owned(),
+            health_binary: PathBuf::from("/usr/local/bin/gatus-read"),
+            health_commands: BTreeMap::new(),
         }
     }
 }
@@ -81,6 +110,9 @@ pub enum ConfigError {
     /// The pinned child executable must not depend on the caller's working directory.
     #[error("gcx binary path must be absolute")]
     RelativeGcxPath,
+    /// A read-only context executable path was relative.
+    #[error("read-only context binary paths must be absolute")]
+    RelativeReadOnlyPath,
     /// The provider order is invalid.
     #[error("provider order is invalid")]
     InvalidProviderOrder,
@@ -124,6 +156,13 @@ impl AppConfig {
         }
         if !self.gcx_binary.is_absolute() {
             return Err(ConfigError::RelativeGcxPath);
+        }
+        if !self.read_only.git_binary.is_absolute()
+            || !self.read_only.health_binary.is_absolute()
+            || self.read_only.git_repository.trim().is_empty()
+            || !self.read_only.git_repository.starts_with('/')
+        {
+            return Err(ConfigError::RelativeReadOnlyPath);
         }
         if self.gcx_timeout_secs == 0
             || self.gcx_max_output_bytes == 0

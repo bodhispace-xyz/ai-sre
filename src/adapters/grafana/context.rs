@@ -131,6 +131,10 @@ impl GrafanaContext {
                 self.metrics_with_budget(board, budget, call.query.clone())
                     .await
             }
+            ContextTool::ReadDesiredState
+            | ContextTool::ReadDeploymentHistory
+            | ContextTool::ReadHealth
+            | ContextTool::DiscoverObservability => Err(ContextError::UnsupportedTool),
         };
         let mut result = match result {
             Ok(evidence_id) => ToolResult {
@@ -174,6 +178,10 @@ impl GrafanaContext {
             let source = match call.tool {
                 ContextTool::QueryLogs => EvidenceSource::GrafanaLogs,
                 ContextTool::QueryMetrics => EvidenceSource::GrafanaMetrics,
+                ContextTool::ReadDesiredState
+                | ContextTool::ReadDeploymentHistory
+                | ContextTool::ReadHealth
+                | ContextTool::DiscoverObservability => EvidenceSource::ObservabilityMetadata,
             };
             result.evidence_id = board
                 .commit_with_metadata(
@@ -283,6 +291,9 @@ pub enum ContextError {
     /// The investigation exhausted its bounded read-only query allowance.
     #[error("Grafana context query budget exhausted")]
     QueryBudgetExceeded,
+    /// The requested capability belongs to another read-only adapter.
+    #[error("context capability is handled by another adapter")]
+    UnsupportedTool,
 }
 
 #[cfg(test)]

@@ -23,6 +23,14 @@ pub enum ContextTool {
     QueryLogs,
     /// Query Prometheus through the fixed read-only adapter.
     QueryMetrics,
+    /// Read a server-selected desired-state file from Git.
+    ReadDesiredState,
+    /// Read bounded deployment history from Git.
+    ReadDeploymentHistory,
+    /// Read one server-owned health alias.
+    ReadHealth,
+    /// Discover bounded server-owned observability capabilities.
+    DiscoverObservability,
 }
 
 /// A validated request extracted from a provider response.
@@ -49,6 +57,10 @@ pub fn parse_tool_call(
     let tool = match name {
         "query_logs" => ContextTool::QueryLogs,
         "query_metrics" => ContextTool::QueryMetrics,
+        "read_desired_state" => ContextTool::ReadDesiredState,
+        "read_deployment_history" => ContextTool::ReadDeploymentHistory,
+        "read_health" => ContextTool::ReadHealth,
+        "discover_observability" => ContextTool::DiscoverObservability,
         _ => return Err(ToolLoopError::UnknownTool),
     };
     let query = serde_json::from_str::<ToolArguments>(arguments)
@@ -236,12 +248,27 @@ mod tests {
     #[test]
     fn tool_contract_names_only_read_only_context_capabilities() {
         // Given the complete model-directed capability set.
-        let tools = [ContextTool::QueryLogs, ContextTool::QueryMetrics];
+        let tools = [
+            ContextTool::QueryLogs,
+            ContextTool::QueryMetrics,
+            ContextTool::ReadDesiredState,
+            ContextTool::ReadDeploymentHistory,
+            ContextTool::ReadHealth,
+            ContextTool::DiscoverObservability,
+        ];
 
         // When each capability is classified.
-        let all_read_only = tools
-            .iter()
-            .all(|tool| matches!(tool, ContextTool::QueryLogs | ContextTool::QueryMetrics));
+        let all_read_only = tools.iter().all(|tool| {
+            matches!(
+                tool,
+                ContextTool::QueryLogs
+                    | ContextTool::QueryMetrics
+                    | ContextTool::ReadDesiredState
+                    | ContextTool::ReadDeploymentHistory
+                    | ContextTool::ReadHealth
+                    | ContextTool::DiscoverObservability
+            )
+        });
 
         // Then no shell, mutation, credential, or filesystem capability exists.
         assert!(all_read_only);

@@ -9,6 +9,7 @@ use thiserror::Error;
 
 use crate::{
     adapters::{
+        context::{ReadOnlyContext, ReadOnlyContextConfig, ReadOnlyRunner},
         grafana::{
             context::{GrafanaContext, GrafanaContextConfig},
             gcx::GcxRunner,
@@ -26,6 +27,8 @@ pub struct Application {
     pub runtime: IncidentRuntime,
     /// Read-only Grafana context adapter.
     pub grafana: GrafanaContext,
+    /// Server-owned Git, deployment-history, and health context adapter.
+    pub read_only: ReadOnlyContext,
     /// OpenAI refresh-token cache boundary.
     pub openai_cache: AuthCache,
     /// OpenAI OAuth transport boundary.
@@ -60,9 +63,24 @@ pub fn build(config: AppConfig) -> Result<Application, BootstrapError> {
             metrics_datasource: config.grafana.metrics_datasource,
         },
     );
+    let read_only = ReadOnlyContext::new(
+        ReadOnlyRunner::new(
+            Duration::from_secs(config.gcx_timeout_secs),
+            config.gcx_max_output_bytes,
+            config.gcx_max_concurrency,
+        ),
+        ReadOnlyContextConfig {
+            git_binary: config.read_only.git_binary,
+            git_repository: config.read_only.git_repository,
+            health_binary: config.read_only.health_binary,
+            health_commands: config.read_only.health_commands,
+        },
+    )
+    .map_err(|_| BootstrapError::Configuration(ConfigError::RelativeReadOnlyPath))?;
     Ok(Application {
         runtime,
         grafana,
+        read_only,
         openai_cache: AuthCache::new(config.openai_cache_path),
         openai_oauth: OpenAiOAuth::new(),
     })
