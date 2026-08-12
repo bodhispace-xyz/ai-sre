@@ -1,0 +1,18 @@
+# Gate A is reviewed before results are collected. This file is immutable
+# policy, not a result file; the service has no code path that edits it.
+schema: KTD21/v1
+gate: A
+mode: shadow
+minimum_cases: 20
+minimum_failure_classes: 5
+repeats_per_case: 3
+p95_max_seconds: 300
+max_evidence_rounds: 2
+max_grafana_queries: 8
+requires_deterministic_fallback: true
+requires_openai: true
+requires_gemini: true
+requires_deepseek: true
+requires_offline_signature: true
+action_policy: disabled
+external_write_credentials: absent
