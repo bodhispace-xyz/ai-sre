@@ -36,6 +36,7 @@ use crate::{
         storage::{JournalStore, OutboxMessage},
     },
     transport::{AlertIntake, IntakeCommand, IntakeConfig},
+    web::incidents::IncidentPages,
 };
 
 /// Application startup and worker failures after configuration parsing.
@@ -78,6 +79,8 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
     let (sender, mut receiver) = mpsc::channel::<IntakeCommand>(64);
     let metrics = MetricsSnapshot::default();
     let worker_metrics = metrics.clone();
+    let pages = IncidentPages::default();
+    let worker_pages = pages.clone();
     let (worker_failed, worker_failed_rx) = oneshot::channel();
     let mut dispatcher = IncidentDispatcher::new(JournalStore::open(journal_path)?);
     let gemini = gated_api_provider(
@@ -218,6 +221,9 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                     }
                 }
                 if result.is_ok() {
+                    if let Ok(report) = result.as_ref() {
+                        worker_pages.put(report.clone()).await;
+                    }
                     let outbox = result.as_ref().ok().map(|result| OutboxMessage {
                         delivery_id: format!("{}:report", result.incident_id),
                         body: crate::adapters::ntfy::render_message(result),
@@ -243,7 +249,7 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
     let intake_next_token = env::var("AI_SRE_ALERTMANAGER_NEXT_TOKEN").ok();
     let intake = AlertIntake::new(IntakeConfig::default())
         .with_bearer_tokens(intake_token, intake_next_token)
-        .serve_with_metrics(listener, sender, metrics);
+        .serve_with_metrics_and_pages(listener, sender, metrics, pages);
     tokio::pin!(intake);
     tokio::pin!(worker);
     tokio::select! {

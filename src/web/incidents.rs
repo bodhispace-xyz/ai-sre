@@ -1,6 +1,36 @@
 //! Bounded, escaped incident-page rendering with no mutation controls.
 
+use std::{collections::BTreeMap, sync::Arc};
+
+use tokio::sync::RwLock;
+
 use crate::reasoning::investigation::InvestigationResult;
+
+/// Maximum number of completed reports retained for operator reads.
+pub const MAX_STORED_REPORTS: usize = 256;
+
+/// Bounded in-process projection of reports for the read-only page.
+#[derive(Clone, Default)]
+pub struct IncidentPages(Arc<RwLock<BTreeMap<String, InvestigationResult>>>);
+
+impl IncidentPages {
+    /// Stores the latest report and evicts oldest keys at the bound.
+    pub async fn put(&self, result: InvestigationResult) {
+        let mut reports = self.0.write().await;
+        reports.insert(result.incident_id.clone(), result);
+        while reports.len() > MAX_STORED_REPORTS {
+            let Some(key) = reports.keys().next().cloned() else {
+                break;
+            };
+            reports.remove(&key);
+        }
+    }
+
+    /// Returns a report only for an exact incident identity.
+    pub async fn get(&self, incident_id: &str) -> Option<InvestigationResult> {
+        self.0.read().await.get(incident_id).cloned()
+    }
+}
 
 /// Security headers required on the read-only incident page.
 pub const SECURITY_HEADERS: &[(&str, &str)] = &[
@@ -33,7 +63,7 @@ fn escape_html(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::render;
+    use super::{IncidentPages, MAX_STORED_REPORTS, render};
     use crate::reasoning::{
         contracts::{DiagnosticReport, EvidenceRef},
         investigation::InvestigationResult,
@@ -61,5 +91,32 @@ mod tests {
         assert!(!page.contains("<script>"));
         assert!(page.contains("&lt;script&gt;"));
         assert!(!page.contains("approve"));
+    }
+
+    #[tokio::test]
+    async fn incident_pages_are_bounded_and_exactly_addressable() {
+        // Given more reports than the in-process page projection permits.
+        let pages = IncidentPages::default();
+        for index in 0..=MAX_STORED_REPORTS {
+            pages
+                .put(InvestigationResult {
+                    incident_id: format!("incident-{index:04}"),
+                    evidence_ids: std::collections::BTreeSet::new(),
+                    status: crate::reasoning::coordinator::RunStatus::Exhausted,
+                    report: DiagnosticReport {
+                        summary: "bounded".to_owned(),
+                        evidence: Vec::new(),
+                    },
+                })
+                .await;
+        }
+
+        // When an operator requests an exact incident identity.
+        let retained = pages.get("incident-0256").await;
+        let evicted = pages.get("incident-0000").await;
+
+        // Then the newest report is available and older state is evicted.
+        assert!(retained.is_some());
+        assert!(evicted.is_none());
     }
 }
