@@ -232,10 +232,10 @@ async fn handle_incident(
     if authenticate(&state.intake, &headers).is_err() {
         return response_with_close(StatusCode::UNAUTHORIZED);
     }
-    let Some(result) = state.pages.get(&incident_id).await else {
+    let Some(rendered) = state.pages.get(&incident_id).await else {
         return response_with_close(StatusCode::NOT_FOUND);
     };
-    let mut response = crate::web::incidents::render(&result).into_response();
+    let mut response = rendered.into_response();
     *response.status_mut() = StatusCode::OK;
     for (name, value) in crate::web::incidents::SECURITY_HEADERS {
         if let (Ok(name), Ok(value)) = (

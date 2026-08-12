@@ -3,7 +3,7 @@
 use std::collections::BTreeSet;
 
 use ai_sre::{
-    adapters::ntfy::render_message,
+    adapters::ntfy::{render_message, render_message_with_view},
     reasoning::{
         contracts::DiagnosticReport, coordinator::RunStatus, investigation::InvestigationResult,
         router::ProviderKind,
@@ -31,4 +31,8 @@ fn notification_contains_report_context_but_no_execution_authority() {
     assert!(message.contains("API error rate is elevated."));
     assert!(message.contains("Mode: shadow; no action executed."));
     assert!(!message.contains("command:"));
+
+    // And the optional operator link is encoded as one stable path segment.
+    let linked = render_message_with_view(&result, Some("https://sre.example/incidents"));
+    assert!(linked.contains("View: https://sre.example/incidents/incident-fp-123"));
 }

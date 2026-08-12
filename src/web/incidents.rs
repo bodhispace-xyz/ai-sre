@@ -11,13 +11,14 @@ pub const MAX_STORED_REPORTS: usize = 256;
 
 /// Bounded in-process projection of reports for the read-only page.
 #[derive(Clone, Default)]
-pub struct IncidentPages(Arc<RwLock<BTreeMap<String, InvestigationResult>>>);
+pub struct IncidentPages(Arc<RwLock<BTreeMap<String, String>>>);
 
 impl IncidentPages {
     /// Stores the latest report and evicts oldest keys at the bound.
     pub async fn put(&self, result: InvestigationResult) {
         let mut reports = self.0.write().await;
-        reports.insert(result.incident_id.clone(), result);
+        let incident_id = result.incident_id.clone();
+        reports.insert(incident_id, render(&result));
         while reports.len() > MAX_STORED_REPORTS {
             let Some(key) = reports.keys().next().cloned() else {
                 break;
@@ -27,8 +28,20 @@ impl IncidentPages {
     }
 
     /// Returns a report only for an exact incident identity.
-    pub async fn get(&self, incident_id: &str) -> Option<InvestigationResult> {
+    pub async fn get(&self, incident_id: &str) -> Option<String> {
         self.0.read().await.get(incident_id).cloned()
+    }
+
+    /// Restores a previously rendered report without reintroducing raw payloads.
+    pub async fn put_rendered(&self, incident_id: String, rendered: String) {
+        let mut reports = self.0.write().await;
+        reports.insert(incident_id, rendered);
+        while reports.len() > MAX_STORED_REPORTS {
+            let Some(key) = reports.keys().next().cloned() else {
+                break;
+            };
+            reports.remove(&key);
+        }
     }
 }
 
@@ -44,10 +57,24 @@ pub const SECURITY_HEADERS: &[(&str, &str)] = &[
 
 /// Renders a small accessible report page from already-redacted state.
 pub fn render(result: &InvestigationResult) -> String {
-    let summary = escape_html(&result.report.summary);
+    let summary = escape_html(&crate::reasoning::investigation::redact_text(
+        &result.report.summary,
+    ));
+    let provider = crate::reasoning::investigation::ShadowInvestigator::terminal_provider(result)
+        .map_or_else(
+            || "deterministic-baseline".to_owned(),
+            |provider| format!("{provider:?}"),
+        );
+    let citations = result
+        .report
+        .evidence
+        .iter()
+        .map(|evidence| format!("<li>{}</li>", escape_html(&evidence.evidence_id)))
+        .collect::<String>();
     format!(
-        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>AI SRE incident</title></head><body><main><h1>Incident {}</h1><p role=\"status\">{summary}</p><p>Evidence records: {}</p><p>Mode: shadow; no action controls are available.</p></main></body></html>",
+        "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>AI SRE incident</title></head><body><main><h1>Incident {}</h1><p role=\"status\">{summary}</p><p>Status: {:?}</p><p>Provider: {provider}</p><p>Evidence records: {}</p><ul aria-label=\"Evidence citations\">{citations}</ul><p>Efficiency and cost are reconstructed from the durable journal. Mode: shadow; no action controls are available.</p></main></body></html>",
         escape_html(&result.incident_id),
+        result.status,
         result.evidence_ids.len()
     )
 }

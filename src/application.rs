@@ -25,7 +25,7 @@ use crate::{
     },
     bootstrap,
     config::AppConfig,
-    observability::MetricsSnapshot,
+    observability::{MetricsSnapshot, StructuredLog},
     reasoning::{
         budget::Reservation,
         dispatcher::IncidentDispatcher,
@@ -33,7 +33,7 @@ use crate::{
         investigation::{LiveInvestigationInput, ShadowInvestigator, investigate_live},
         live::{LiveProvider, LiveProviders},
         runtime::IncidentRuntime,
-        storage::{JournalStore, OutboxMessage},
+        storage::{JournalStore, OutboxMessage, StoredReport},
     },
     transport::{AlertIntake, IntakeCommand, IntakeConfig},
     web::incidents::IncidentPages,
@@ -63,6 +63,9 @@ pub enum ApplicationError {
     /// Operator notification delivery was not configured.
     #[error("NTFY_ENDPOINT and NTFY_TOPIC must be configured")]
     MissingNotificationConfig,
+    /// Operator notification destination failed its safety policy.
+    #[error("NTFY_ENDPOINT and NTFY_TOPIC do not describe a valid HTTPS publish destination")]
+    InvalidNotificationConfig,
     /// The incident worker stopped after a durable processing failure.
     #[error("incident worker stopped after a durable processing failure")]
     WorkerFailed,
@@ -83,6 +86,12 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
     let worker_pages = pages.clone();
     let (worker_failed, worker_failed_rx) = oneshot::channel();
     let mut dispatcher = IncidentDispatcher::new(JournalStore::open(journal_path)?);
+    for report in dispatcher
+        .journal()
+        .stored_reports(crate::web::incidents::MAX_STORED_REPORTS)?
+    {
+        pages.put_rendered(report.incident_id, report.html).await;
+    }
     let gemini = gated_api_provider(
         "gemini",
         "gemini-2.5-flash",
@@ -100,10 +109,13 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
     )
     .map(DeepSeekClient::new);
     let ntfy = match (env::var("NTFY_ENDPOINT").ok(), env::var("NTFY_TOPIC").ok()) {
-        (Some(endpoint), Some(topic)) => Some(NtfyPublisher::new(
-            NtfyConfig { endpoint, topic },
-            env::var("NTFY_TOKEN").ok(),
-        )),
+        (Some(endpoint), Some(topic)) => {
+            let config = NtfyConfig { endpoint, topic };
+            if !config.is_valid() {
+                return Err(ApplicationError::InvalidNotificationConfig);
+            }
+            Some(NtfyPublisher::new(config, env::var("NTFY_TOKEN").ok()))
+        }
         _ => return Err(ApplicationError::MissingNotificationConfig),
     };
     let rig_gate_accepted = env::var("RIG_GATE").ok().as_deref() == Some("accepted");
@@ -121,11 +133,21 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                 acknowledged,
             }
         });
+        let mut retry_tick = tokio::time::interval(std::time::Duration::from_secs(15));
+        retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         'worker: loop {
             let startup = startup_command.is_some();
             let Some(command) = (match startup_command.take() {
                 Some(command) => Some(command),
-                None => receiver.recv().await,
+                None => {
+                    tokio::select! {
+                        command = receiver.recv() => command,
+                        _ = retry_tick.tick() => {
+                            drain_outbox(&mut dispatcher, ntfy.as_ref()).await;
+                            continue 'worker;
+                        }
+                    }
+                }
             }) else {
                 break;
             };
@@ -169,6 +191,14 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                 };
                 let start_at_ms = runtime.elapsed_ms();
                 let run_id = format!("{}-{}", incident.incident_id, now_ms());
+                if let Some(log) = StructuredLog::new(
+                    "investigation.started",
+                    &incident.incident_id,
+                    &run_id,
+                    Some("investigation"),
+                ) {
+                    log.emit();
+                }
                 let global_budget_admitted = reserve_paid_budget(
                     dispatcher.journal_mut(),
                     &run_id,
@@ -207,6 +237,14 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                     start_at_ms,
                 })
                 .await;
+                if let Some(log) = StructuredLog::new(
+                    "investigation.finished",
+                    &incident.incident_id,
+                    &run_id,
+                    Some("reasoning"),
+                ) {
+                    log.emit();
+                }
                 if paid_provider_count > 0 && global_budget_admitted {
                     let actual_cost = runtime.journal().project();
                     let actual_cost = (actual_cost.unknown_cost_attempts == 0)
@@ -220,21 +258,28 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                         break 'worker;
                     }
                 }
-                if result.is_ok() {
-                    if let Ok(report) = result.as_ref() {
-                        worker_pages.put(report.clone()).await;
-                    }
+                if let Ok(report) = result.as_ref() {
                     let outbox = result.as_ref().ok().map(|result| OutboxMessage {
                         delivery_id: format!("{}:report", result.incident_id),
-                        body: crate::adapters::ntfy::render_message(result),
+                        body: crate::adapters::ntfy::render_message_with_view(
+                            result,
+                            env::var("AI_SRE_UI_BASE_URL").ok().as_deref(),
+                        ),
                     });
-                    if let Err(error) =
-                        dispatcher.mark_completed_with_outbox(&incident.incident_id, outbox)
-                    {
+                    let rendered = crate::web::incidents::render(report);
+                    if let Err(error) = dispatcher.mark_completed_with_report(
+                        &incident.incident_id,
+                        outbox,
+                        StoredReport {
+                            incident_id: report.incident_id.clone(),
+                            html: rendered,
+                        },
+                    ) {
                         eprintln!("incident completion journal failed: {error}");
                         let _ = worker_failed.send(());
                         break 'worker;
                     }
+                    worker_pages.put(report.clone()).await;
                 }
                 drain_outbox(&mut dispatcher, ntfy.as_ref()).await;
                 worker_metrics
@@ -308,8 +353,19 @@ async fn drain_outbox(dispatcher: &mut IncidentDispatcher, ntfy: Option<&NtfyPub
         }
     };
     for message in pending {
-        match ntfy.publish_message(&message.body).await {
+        match ntfy
+            .publish_with_delivery_id(&message.delivery_id, &message.body)
+            .await
+        {
             Ok(()) => {
+                if let Some(log) = StructuredLog::new(
+                    "notification.delivered",
+                    &message.delivery_id,
+                    "outbox",
+                    Some("execution"),
+                ) {
+                    log.emit();
+                }
                 if let Err(error) = dispatcher
                     .journal_mut()
                     .mark_outbox_delivered(&message.delivery_id, now_ms())
@@ -317,7 +373,17 @@ async fn drain_outbox(dispatcher: &mut IncidentDispatcher, ntfy: Option<&NtfyPub
                     eprintln!("notification outbox acknowledgement failed: {error}");
                 }
             }
-            Err(error) => eprintln!("ntfy publication failed: {error}"),
+            Err(error) => {
+                eprintln!("ntfy publication failed: {error}");
+                if let Some(log) = StructuredLog::new(
+                    "notification.failed",
+                    &message.delivery_id,
+                    "outbox",
+                    Some("execution"),
+                ) {
+                    log.emit();
+                }
+            }
         }
     }
 }

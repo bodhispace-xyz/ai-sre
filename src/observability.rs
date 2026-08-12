@@ -48,6 +48,23 @@ impl StructuredLog {
             phase,
         })
     }
+
+    /// Emits one bounded JSON log record without including payloads or queries.
+    pub fn emit(self) {
+        eprintln!(
+            "{{\"event\":\"{}\",\"incident_id\":\"{}\",\"run_id\":\"{}\",\"phase\":{}}}",
+            escape_json(&self.event),
+            escape_json(&self.incident_id),
+            escape_json(&self.run_id),
+            self.phase
+                .map(|phase| format!("\"{}\"", escape_json(&phase)))
+                .unwrap_or_else(|| "null".to_owned())
+        );
+    }
+}
+
+fn escape_json(value: &str) -> String {
+    value.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Bounded OTel-style span fields; export failure is non-blocking.
