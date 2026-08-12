@@ -147,7 +147,8 @@ fn contract_failure(error: ContractError) -> ProviderFailure {
         ContractError::MalformedProviderResponse
         | ContractError::UnknownEvidence(_)
         | ContractError::EmptySummary
-        | ContractError::MissingEvidence => ProviderFailure::MalformedResponse,
+        | ContractError::MissingEvidence
+        | ContractError::MissingSafetyField => ProviderFailure::MalformedResponse,
     }
 }
 

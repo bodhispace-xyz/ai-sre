@@ -6,7 +6,9 @@ use ai_sre::adapters::llm::{
     ApiKey, ProviderFailure, deepseek::DeepSeekClient, gemini::GeminiClient,
 };
 use ai_sre::reasoning::budget::{BudgetConfig, BudgetError, BudgetState, Reservation};
-use ai_sre::reasoning::contracts::{ContractError, DiagnosticReport, EvidenceRef};
+use ai_sre::reasoning::contracts::{
+    AdvisoryRecommendation, ContractError, DiagnosticReport, EvidenceRef,
+};
 use ai_sre::reasoning::coordinator::{
     AttemptFacts, AttemptOutcome, AttemptRecord, CoordinatorError, FailureClass, ReasoningConfig,
     ReasoningRun, RunStatus,
@@ -155,6 +157,27 @@ fn diagnostic_report_rejects_missing_evidence() {
 
     // Then validation rejects the report for missing evidence.
     assert_eq!(result, Err(ContractError::MissingEvidence));
+}
+
+#[test]
+fn planner_recommendation_requires_verification_stop_and_rollback() {
+    // Given a planner artifact with one valid citation but no stop strategy.
+    let recommendation = AdvisoryRecommendation {
+        summary: "Review the deployment revision.".to_owned(),
+        expected_effect: "Identify the first failing revision.".to_owned(),
+        verification: "Compare health samples before and after the revision.".to_owned(),
+        stop_strategy: String::new(),
+        rollback: "Operator chooses a previously qualified revision.".to_owned(),
+        evidence: vec![EvidenceRef {
+            evidence_id: "evidence-0001".to_owned(),
+        }],
+    };
+
+    // When the planner artifact crosses the safety validator.
+    let result = recommendation.validate_against(&BTreeSet::from(["evidence-0001".to_owned()]));
+
+    // Then missing safety language prevents the recommendation being accepted.
+    assert_eq!(result, Err(ContractError::MissingSafetyField));
 }
 
 #[test]
