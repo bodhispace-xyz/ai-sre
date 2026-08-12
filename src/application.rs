@@ -68,7 +68,8 @@ pub enum ApplicationError {
 }
 
 /// Builds dependencies and runs the supervised shadow worker.
-pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), ApplicationError> {
+pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), ApplicationError> {
+    config.reasoning.admitted_providers = admitted_providers_from_environment();
     let reasoning_config = config.reasoning.clone();
     let application = bootstrap::build(config)?;
     let journal_path = env::var_os("AI_SRE_JOURNAL_PATH")
@@ -259,6 +260,36 @@ pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), Appli
             Err(ApplicationError::WorkerFailed)
         }
     }
+}
+
+fn admitted_providers_from_environment() -> Vec<crate::reasoning::router::ProviderKind> {
+    use crate::reasoning::router::ProviderKind;
+    let mut admitted = vec![ProviderKind::Deterministic];
+    if env::var("RIG_GATE").ok().as_deref() == Some("accepted") {
+        admitted.push(ProviderKind::OpenAi);
+    }
+    for (provider, key, gate, pricing) in [
+        (
+            ProviderKind::Gemini,
+            "GEMINI_API_KEY",
+            "GEMINI_GATE",
+            "GEMINI_PRICE_CATALOG",
+        ),
+        (
+            ProviderKind::DeepSeek,
+            "DEEPSEEK_API_KEY",
+            "DEEPSEEK_GATE",
+            "DEEPSEEK_PRICE_CATALOG",
+        ),
+    ] {
+        if env::var_os(key).is_some()
+            && env::var(gate).ok().as_deref() == Some("accepted")
+            && env::var_os(pricing).is_some()
+        {
+            admitted.push(provider);
+        }
+    }
+    admitted
 }
 
 async fn drain_outbox(dispatcher: &mut IncidentDispatcher, ntfy: Option<&NtfyPublisher>) {

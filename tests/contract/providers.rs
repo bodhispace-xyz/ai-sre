@@ -6,7 +6,9 @@ use ai_sre::adapters::llm::{
     ApiKey, ProviderFailure, deepseek::DeepSeekClient, gemini::GeminiClient,
 };
 use ai_sre::reasoning::budget::{BudgetConfig, BudgetError, BudgetState, Reservation};
-use ai_sre::reasoning::contracts::{ContractError, DiagnosticReport, EvidenceRef};
+use ai_sre::reasoning::contracts::{
+    AdvisoryRecommendation, ContractError, DiagnosticReport, EvidenceRef,
+};
 use ai_sre::reasoning::coordinator::{
     AttemptFacts, AttemptOutcome, AttemptRecord, CoordinatorError, FailureClass, ReasoningConfig,
     ReasoningRun, RunStatus,
@@ -158,6 +160,39 @@ fn diagnostic_report_rejects_missing_evidence() {
 }
 
 #[test]
+fn provider_report_payload_is_bounded_before_json_parsing() {
+    // Given provider output larger than the report contract permits.
+    let input = "x".repeat(ai_sre::reasoning::contracts::MAX_PROVIDER_REPORT_BYTES + 1);
+
+    // When the untrusted response crosses the provider-neutral parser.
+    let result = DiagnosticReport::from_provider_json(&input);
+
+    // Then parsing fails closed before deserialization can consume it.
+    assert_eq!(result, Err(ContractError::MalformedProviderResponse));
+}
+
+#[test]
+fn planner_recommendation_requires_verification_stop_and_rollback() {
+    // Given a planner artifact with one valid citation but no stop strategy.
+    let recommendation = AdvisoryRecommendation {
+        summary: "Review the deployment revision.".to_owned(),
+        expected_effect: "Identify the first failing revision.".to_owned(),
+        verification: "Compare health samples before and after the revision.".to_owned(),
+        stop_strategy: String::new(),
+        rollback: "Operator chooses a previously qualified revision.".to_owned(),
+        evidence: vec![EvidenceRef {
+            evidence_id: "evidence-0001".to_owned(),
+        }],
+    };
+
+    // When the planner artifact crosses the safety validator.
+    let result = recommendation.validate_against(&BTreeSet::from(["evidence-0001".to_owned()]));
+
+    // Then missing safety language prevents the recommendation being accepted.
+    assert_eq!(result, Err(ContractError::MissingSafetyField));
+}
+
+#[test]
 fn provider_json_rejects_unknown_fields() {
     // Given provider JSON containing an undeclared field inside an evidence item.
     let json = r#"{
@@ -258,6 +293,7 @@ fn coordinator_reserves_before_each_restart_and_ends_in_baseline() {
         provider_order: ProviderOrder {
             providers: vec![ProviderKind::OpenAi, ProviderKind::Deterministic],
         },
+        admitted_providers: vec![ProviderKind::OpenAi, ProviderKind::Deterministic],
         budget: BudgetConfig {
             max_provider_calls: 2,
             ..BudgetConfig::default()
@@ -591,6 +627,7 @@ fn incident_runtime_emits_evidence_attempt_and_terminal_journal_facts() {
         provider_order: ProviderOrder {
             providers: vec![ProviderKind::Deterministic],
         },
+        admitted_providers: vec![ProviderKind::Deterministic],
         budget: BudgetConfig::default(),
         max_tool_turns: 4,
     };
@@ -842,6 +879,26 @@ fn bootstrap_rejects_zero_process_limits_before_assembling_adapters() {
     // Then it fails closed without constructing external clients.
     assert_eq!(result, Err(ConfigError::ZeroLimit));
     assert!(bootstrap::build(config).is_err());
+}
+
+#[test]
+fn reasoning_rejects_an_empty_provider_admission_set() {
+    // Given a provider order with no independently qualified providers.
+    let config = ReasoningConfig {
+        admitted_providers: Vec::new(),
+        ..ReasoningConfig::default()
+    };
+
+    // When the reasoning coordinator is assembled.
+    let result = ReasoningRun::new(config);
+
+    // Then no provider can run without an explicit live gate.
+    assert!(matches!(
+        result,
+        Err(CoordinatorError::InvalidOrder(
+            "provider admission set cannot be empty"
+        ))
+    ));
 }
 
 #[test]

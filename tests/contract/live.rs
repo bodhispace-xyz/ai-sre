@@ -16,6 +16,7 @@ async fn live_runner_uses_deterministic_baseline_when_external_providers_are_abs
         provider_order: ProviderOrder {
             providers: vec![ProviderKind::Deterministic],
         },
+        admitted_providers: vec![ProviderKind::Deterministic],
         budget: BudgetConfig::default(),
         max_tool_turns: 4,
     })

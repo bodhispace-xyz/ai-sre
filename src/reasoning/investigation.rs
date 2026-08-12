@@ -454,7 +454,7 @@ async fn run_live_with_context(
                         .iter()
                         .map(|record| record.evidence_id.clone())
                         .collect::<BTreeSet<_>>();
-                    if report.validate_against(&evidence_ids).is_ok() {
+                    if super::validate::validate_report(&report, &evidence_ids, prompt).is_ok() {
                         let status = runtime.succeed_provider_with_report(
                             provider,
                             report,
@@ -679,7 +679,8 @@ async fn provider_turn<'a>(
 
 fn build_prompt(signal: &IncidentSignal, runtime: &IncidentRuntime) -> String {
     let mut prompt = format!(
-        "Diagnose incident {} (alert {}). Return strict JSON with summary and evidence citations.\nTools available: discover_observability(query), query_logs(query), query_metrics(query), read_desired_state(query), read_deployment_history(query), read_health(query). These are read-only, bounded, and server-policy-owned.\nRemaining configured evidence-query ceiling: {}. Do not execute commands, write state, or request credentials.\n",
+        "Prompt version: {}\nDiagnose incident {} (alert {}). Return strict JSON with summary and evidence citations.\nTools available: discover_observability(query), query_logs(query), query_metrics(query), read_desired_state(query), read_deployment_history(query), read_health(query). These are read-only, bounded, and server-policy-owned.\nRemaining configured evidence-query ceiling: {}. Do not execute commands, write state, or request credentials.\n",
+        super::prompts::PROMPT_VERSION,
         signal.incident_id,
         signal.alert_name,
         runtime

@@ -182,6 +182,12 @@ impl AppConfig {
 pub fn reasoning_config(order: ProviderOrder, budget: BudgetConfig) -> ReasoningConfig {
     ReasoningConfig {
         provider_order: order,
+        admitted_providers: vec![
+            crate::reasoning::router::ProviderKind::OpenAi,
+            crate::reasoning::router::ProviderKind::Gemini,
+            crate::reasoning::router::ProviderKind::DeepSeek,
+            crate::reasoning::router::ProviderKind::Deterministic,
+        ],
         budget,
         max_tool_turns: 4,
     }

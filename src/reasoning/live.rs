@@ -12,6 +12,7 @@ use super::{
     budget::Reservation,
     contracts::DiagnosticReport,
     coordinator::{AttemptFacts, CoordinatorError, FailureClass, RunStatus},
+    roles::{ReasoningRole, RoleGraph},
     router::ProviderKind,
     runtime::{IncidentRuntime, RuntimeError},
     tools::{ToolCall, ToolResult},
@@ -115,6 +116,10 @@ pub async fn run_live_with_alert_name(
             Err(error) => return Err(error),
         };
         let started = Instant::now();
+        let mut role_graph = RoleGraph::new();
+        let _investigator = role_graph
+            .advance()
+            .expect("fresh provider run starts with investigator");
         let result = if let Some(remaining) = runtime.remaining() {
             timeout(remaining, async {
                 match provider {
@@ -153,6 +158,14 @@ pub async fn run_live_with_alert_name(
         };
         match result {
             Ok(LiveTurn::Final { report, .. }) => {
+                let role_sequence_valid = [
+                    ReasoningRole::Diagnostician,
+                    ReasoningRole::Planner,
+                    ReasoningRole::Critic,
+                ]
+                .into_iter()
+                .all(|expected| role_graph.advance().ok() == Some(expected))
+                    && role_graph.is_complete();
                 if report
                     .validate_against(
                         &runtime
@@ -163,6 +176,7 @@ pub async fn run_live_with_alert_name(
                             .collect(),
                     )
                     .is_ok()
+                    && role_sequence_valid
                 {
                     return runtime.succeed_provider_with_report(provider, report, facts, at_ms);
                 }
