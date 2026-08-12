@@ -11,3 +11,8 @@ pub mod bootstrap;
 pub mod config;
 pub mod observability;
 pub mod qualification;
+
+/// Pure promotion and gate-admission contracts.
+pub mod domain;
+/// Runtime policy for loading signed promotion manifests.
+pub mod policy;
