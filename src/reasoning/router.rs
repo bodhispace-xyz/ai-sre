@@ -44,6 +44,26 @@ pub struct ProviderRunState {
     generation: u32,
 }
 
+/// Versioned admission set for providers that have passed their live gates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProviderAdmission {
+    admitted: BTreeSet<ProviderKind>,
+}
+
+impl ProviderAdmission {
+    /// Creates an admission policy from providers independently qualified for shadow use.
+    pub fn new(admitted: impl IntoIterator<Item = ProviderKind>) -> Self {
+        Self {
+            admitted: admitted.into_iter().collect(),
+        }
+    }
+
+    /// Returns whether a provider may be selected by the fallback router.
+    pub fn allows(&self, provider: ProviderKind) -> bool {
+        self.admitted.contains(&provider)
+    }
+}
+
 impl Default for ProviderOrder {
     fn default() -> Self {
         Self {
@@ -99,6 +119,24 @@ impl ProviderRunState {
         })
     }
 
+    /// Starts the next provider that is both unattempted and independently admitted.
+    pub fn start_next_admitted(
+        &mut self,
+        order: &ProviderOrder,
+        admission: &ProviderAdmission,
+    ) -> Option<ProviderRun> {
+        let provider =
+            order.providers.iter().copied().find(|provider| {
+                !self.attempted.contains(provider) && admission.allows(*provider)
+            })?;
+        self.attempted.insert(provider);
+        self.generation = self.generation.saturating_add(1);
+        Some(ProviderRun {
+            provider,
+            generation: self.generation,
+        })
+    }
+
     /// Returns whether a provider has already owned a complete run.
     pub fn attempted(&self, provider: ProviderKind) -> bool {
         self.attempted.contains(&provider)
@@ -135,5 +173,21 @@ mod tests {
         assert_eq!(second.provider, ProviderKind::Gemini);
         assert_ne!(first.generation, second.generation);
         assert!(state.attempted(ProviderKind::OpenAi));
+    }
+
+    #[test]
+    fn fallback_skips_providers_without_an_independent_admission_gate() {
+        // Given an order where only deterministic reasoning has passed its gate.
+        let order = ProviderOrder::default();
+        let admission = super::ProviderAdmission::new([ProviderKind::Deterministic]);
+        let mut state = ProviderRunState::default();
+
+        // When the router selects the next admitted provider.
+        let run = state
+            .start_next_admitted(&order, &admission)
+            .expect("deterministic fallback");
+
+        // Then unauthenticated paid providers are never selected.
+        assert_eq!(run.provider, ProviderKind::Deterministic);
     }
 }
