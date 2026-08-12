@@ -16,6 +16,9 @@ pub mod tracing;
 /// Low-cardinality phase labels accepted by telemetry emitters.
 pub const ALLOWED_PHASES: &[&str] = &["investigation", "reasoning", "human_wait", "execution"];
 
+/// Controlled operation names accepted by the trace exporter.
+pub const ALLOWED_TRACE_NAMES: &[&str] = &["incident.investigation", "incident.reasoning"];
+
 /// Bounded structured log fields. Payloads and query text are excluded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredLog {

@@ -41,8 +41,10 @@ impl TraceEvent {
         duration_ms: u64,
     ) -> Option<Self> {
         if !super::ALLOWED_PHASES.contains(&phase)
+            || !super::ALLOWED_TRACE_NAMES.contains(&name)
             || trace_id.trim().is_empty()
             || span_id.trim().is_empty()
+            || provider.is_some_and(|value| !is_safe_metadata(value))
         {
             return None;
         }
@@ -55,6 +57,13 @@ impl TraceEvent {
             duration_ms,
         })
     }
+}
+
+fn is_safe_metadata(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
 }
 
 /// Non-blocking exporter state.
@@ -131,7 +140,15 @@ mod tests {
         let exporter =
             TraceExporter::start(Some("http://127.0.0.1:1/v1/traces".into()), 1).expect("exporter");
         let event = || {
-            TraceEvent::new("trace", "span", "incident", "investigation", None, 1).expect("event")
+            TraceEvent::new(
+                "trace",
+                "span",
+                "incident.investigation",
+                "investigation",
+                None,
+                1,
+            )
+            .expect("event")
         };
         // When multiple events arrive faster than the exporter can deliver.
         assert!(exporter.try_record(event()));
@@ -145,9 +162,19 @@ mod tests {
         // Given a raw log body and an unapproved phase.
         // When a trace event crosses the metadata boundary.
         // Then no sensitive body or uncontrolled phase can be exported.
-        assert!(TraceEvent::new("trace", "span", "log-body-secret", "query", None, 1).is_none());
         assert!(
-            TraceEvent::new("trace", "span", "investigation", "investigation", None, 1).is_some()
+            TraceEvent::new("trace", "span", "incident.investigation", "query", None, 1,).is_none()
+        );
+        assert!(
+            TraceEvent::new(
+                "trace",
+                "span",
+                "incident.investigation",
+                "investigation",
+                None,
+                1,
+            )
+            .is_some()
         );
     }
 }
