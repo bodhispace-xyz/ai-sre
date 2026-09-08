@@ -19,6 +19,9 @@ use crate::reasoning::{budget::BudgetConfig, coordinator::ReasoningConfig, route
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AppConfig {
+    /// Bounded optional trace-export settings.
+    #[serde(default)]
+    pub tracing: TracingConfig,
     /// Reasoning provider order and incident budgets.
     pub reasoning: ReasoningConfig,
     /// Grafana read-only context settings.
@@ -42,6 +45,7 @@ pub struct AppConfig {
 impl Default for AppConfig {
     fn default() -> Self {
         Self {
+            tracing: TracingConfig::default(),
             reasoning: ReasoningConfig::default(),
             grafana: GrafanaConfig::default(),
             read_only: ReadOnlyConfig::default(),
@@ -52,6 +56,37 @@ impl Default for AppConfig {
             gcx_max_query_bytes: 4_096,
             gcx_max_concurrency: 4,
         }
+    }
+}
+
+/// Resource ceilings for best-effort trace export, independent of incident budgets.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct TracingConfig {
+    /// Maximum queued spans (1 through 4096).
+    pub queue_capacity: usize,
+    /// Complete HTTP request deadline in milliseconds (1 through 10000).
+    pub timeout_ms: u64,
+    /// Maximum acknowledgement body bytes (1 through 65536).
+    pub max_response_bytes: usize,
+}
+
+impl Default for TracingConfig {
+    fn default() -> Self {
+        Self {
+            queue_capacity: 128,
+            timeout_ms: 1000,
+            max_response_bytes: 16_384,
+        }
+    }
+}
+
+impl TracingConfig {
+    /// Rejects absent bounds and excessive exporter allocations or deadlines.
+    pub fn is_valid(&self) -> bool {
+        (1..=4096).contains(&self.queue_capacity)
+            && (1..=10_000).contains(&self.timeout_ms)
+            && (1..=65_536).contains(&self.max_response_bytes)
     }
 }
 
@@ -102,6 +137,9 @@ impl Default for GrafanaConfig {
 /// Startup validation failures that must stop the service before I/O.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum ConfigError {
+    /// A trace resource ceiling is outside its supported range.
+    #[error("invalid tracing resource limit")]
+    InvalidTracingLimit,
     /// A required identifier or path is empty.
     #[error("required configuration value is empty")]
     EmptyValue,
@@ -148,6 +186,9 @@ impl AppConfig {
 
     /// Rejects unsafe values before adapters or credentials are assembled.
     pub fn validate(&self) -> Result<(), ConfigError> {
+        if !self.tracing.is_valid() {
+            return Err(ConfigError::InvalidTracingLimit);
+        }
         let shadow_policy =
             ShadowGatePolicy::from_yaml(include_str!("../config/evaluation/shadow-gate.yaml"))
                 .map_err(|_| ConfigError::InvalidProviderOrder)?;
