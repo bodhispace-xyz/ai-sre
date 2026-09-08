@@ -57,6 +57,7 @@ pub const SECURITY_HEADERS: &[(&str, &str)] = &[
 
 /// Renders a small accessible report page from already-redacted state.
 pub fn render(result: &InvestigationResult) -> String {
+    let trace_id = crate::observability::tracing::incident_trace_id(&result.incident_id);
     let summary = escape_html(&crate::reasoning::investigation::redact_text(
         &result.report.summary,
     ));
@@ -71,12 +72,13 @@ pub fn render(result: &InvestigationResult) -> String {
         .iter()
         .map(|evidence| format!("<li>{}</li>", escape_html(&evidence.evidence_id)))
         .collect::<String>();
-    format!(
+    let report = format!(
         "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>AI SRE incident</title></head><body><main><h1>Incident {}</h1><p role=\"status\">{summary}</p><p>Status: {:?}</p><p>Provider: {provider}</p><p>Evidence records: {}</p><ul aria-label=\"Evidence citations\">{citations}</ul><p>Efficiency and cost are reconstructed from the durable journal. Mode: shadow; no action controls are available.</p></main></body></html>",
         escape_html(&result.incident_id),
         result.status,
         result.evidence_ids.len()
-    )
+    );
+    report.replace("</main>", &format!("<p>Tempo trace ID: <code>{trace_id}</code>. Paste into Grafana Explore with the Tempo datasource. A trace may be unavailable if export was disabled, dropped, or expired.</p></main>"))
 }
 
 fn escape_html(value: &str) -> String {

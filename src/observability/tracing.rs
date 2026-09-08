@@ -11,23 +11,51 @@ use std::sync::{
 
 use reqwest::Client;
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio::sync::mpsc::{self, error::TrySendError};
+
+/// Resolves standard OTLP endpoint precedence; trace-specific URLs are used as-is.
+/// Invalid endpoints disable export without affecting incident processing.
+pub fn resolve_endpoint(base: Option<&str>, traces: Option<&str>) -> Option<String> {
+    let selected = traces.or(base)?;
+    let mut url = reqwest::Url::parse(selected).ok()?;
+    if !["http", "https"].contains(&url.scheme())
+        || url.host_str().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return None;
+    }
+    if traces.is_none() {
+        url.set_path(&format!("{}/v1/traces", url.path().trim_end_matches('/')));
+    }
+    Some(url.into())
+}
+
+/// Returns the stable Tempo lookup ID for an incident without disclosing its raw ID.
+pub fn incident_trace_id(incident_id: &str) -> String {
+    correlation_id(incident_id, 16)
+}
 
 /// Metadata-only trace event accepted by the exporter.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct TraceEvent {
     /// Stable trace correlation identifier.
-    pub trace_id: String,
+    trace_id: String,
     /// Stable span identifier.
-    pub span_id: String,
+    span_id: String,
     /// Bounded operation name.
-    pub name: String,
+    name: String,
     /// Controlled workflow phase.
-    pub phase: String,
+    phase: String,
     /// Optional provider/model alias, never a credential.
-    pub provider: Option<String>,
+    provider: Option<String>,
     /// Event duration in milliseconds.
-    pub duration_ms: u64,
+    duration_ms: u64,
+    end_time_unix_nano: u64,
+    outcome: &'static str,
 }
 
 impl TraceEvent {
@@ -44,26 +72,59 @@ impl TraceEvent {
             || !super::ALLOWED_TRACE_NAMES.contains(&name)
             || trace_id.trim().is_empty()
             || span_id.trim().is_empty()
-            || provider.is_some_and(|value| !is_safe_metadata(value))
+            || trace_id.len() > 256
+            || span_id.len() > 256
+            || provider.is_some_and(|value| !["openai", "gemini", "deepseek"].contains(&value))
         {
             return None;
         }
         Some(Self {
-            trace_id: trace_id.chars().take(64).collect(),
-            span_id: span_id.chars().take(32).collect(),
+            trace_id: incident_trace_id(trace_id),
+            span_id: correlation_id(&format!("{span_id}:{name}"), 8),
             name: name.chars().take(128).collect(),
             phase: phase.to_owned(),
             provider: provider.map(|value| value.chars().take(64).collect()),
             duration_ms,
+            outcome: "unspecified",
+            end_time_unix_nano: u64::try_from(
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .ok()?
+                    .as_nanos(),
+            )
+            .ok()?,
         })
+    }
+
+    /// Attaches the terminal domain status without accepting model-generated labels.
+    pub fn with_status(mut self, status: crate::reasoning::coordinator::RunStatus) -> Self {
+        use crate::reasoning::{coordinator::RunStatus, router::ProviderKind};
+        let (provider, outcome) = match status {
+            RunStatus::Succeeded(ProviderKind::OpenAi) => ("openai", "succeeded"),
+            RunStatus::Succeeded(ProviderKind::Gemini) => ("gemini", "succeeded"),
+            RunStatus::Succeeded(ProviderKind::DeepSeek) => ("deepseek", "succeeded"),
+            RunStatus::Succeeded(ProviderKind::Deterministic) => ("deterministic", "baseline"),
+            RunStatus::Exhausted => ("deterministic", "exhausted"),
+        };
+        self.provider = Some(provider.into());
+        self.outcome = outcome;
+        self
+    }
+
+    /// Marks an application failure without serializing its potentially sensitive error.
+    pub fn with_failure(mut self) -> Self {
+        self.outcome = "failed";
+        self.provider = None;
+        self
     }
 }
 
-fn is_safe_metadata(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'_'))
+fn correlation_id(value: &str, bytes: usize) -> String {
+    Sha256::digest(value.as_bytes())
+        .iter()
+        .take(bytes)
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 /// Non-blocking exporter state.
@@ -74,38 +135,57 @@ pub struct TraceExporter {
 }
 
 impl TraceExporter {
-    /// Starts a bounded exporter worker. `None` disables network export while
-    /// retaining the same non-blocking call contract.
+    /// Starts a bounded exporter worker. `None` disables export without a worker.
     pub fn start(endpoint: Option<String>, capacity: usize) -> Option<Self> {
-        if capacity == 0 {
+        Self::configured(
+            endpoint,
+            crate::config::TracingConfig {
+                queue_capacity: capacity,
+                ..Default::default()
+            },
+        )
+    }
+
+    /// Starts export only for a valid full URL and bounded configuration.
+    pub fn configured(
+        endpoint: Option<String>,
+        config: crate::config::TracingConfig,
+    ) -> Option<Self> {
+        if !config.is_valid() {
             return None;
         }
-        let (sender, mut receiver) = mpsc::channel::<TraceEvent>(capacity);
+        let endpoint = resolve_endpoint(None, endpoint.as_deref())?;
+        let (sender, mut receiver) = mpsc::channel::<TraceEvent>(config.queue_capacity);
         let dropped = Arc::new(AtomicU64::new(0));
         let dropped_worker = Arc::clone(&dropped);
         tokio::spawn(async move {
             let client = Client::builder()
-                .timeout(std::time::Duration::from_secs(1))
+                .timeout(std::time::Duration::from_millis(config.timeout_ms))
+                .redirect(reqwest::redirect::Policy::none())
                 .build()
                 .ok();
             while let Some(event) = receiver.recv().await {
-                let Some(url) = endpoint.as_deref() else {
-                    continue;
-                };
+                let url = endpoint.as_str();
                 let Some(client) = client.as_ref() else {
                     dropped_worker.fetch_add(1, Ordering::Relaxed);
                     continue;
                 };
                 let payload = serde_json::json!({
-                    "resourceSpans": [{"scopeSpans": [{"spans": [{
+                    "resourceSpans": [{"resource":{"attributes":[
+                        {"key":"service.name","value":{"stringValue":"ai-sre"}}
+                    ]},"scopeSpans": [{"spans": [{
                         "traceId": event.trace_id, "spanId": event.span_id,
+                        "startTimeUnixNano": event.end_time_unix_nano.saturating_sub(event.duration_ms.saturating_mul(1_000_000)).to_string(),
+                        "endTimeUnixNano": event.end_time_unix_nano.to_string(),
                         "name": event.name, "attributes": [
                             {"key":"phase","value":{"stringValue":event.phase}},
+                            {"key":"outcome","value":{"stringValue":event.outcome}},
+                            {"key":"provider","value":{"stringValue":event.provider.unwrap_or_else(|| "none".into())}},
                             {"key":"duration_ms","value":{"intValue":event.duration_ms.to_string()}}
                         ]
                     }]}]}]
                 });
-                if client.post(url).json(&payload).send().await.is_err() {
+                if !export(client, url, &payload, config.max_response_bytes).await {
                     dropped_worker.fetch_add(1, Ordering::Relaxed);
                 }
             }
@@ -127,6 +207,46 @@ impl TraceExporter {
     /// Number of events dropped by queue or exporter failure.
     pub fn dropped_total(&self) -> u64 {
         self.dropped.load(Ordering::Relaxed)
+    }
+}
+
+// A successful HTTP status can still reject spans. Bound the response before
+// decoding it so an observation sink cannot allocate an unbounded body.
+async fn export(
+    client: &Client,
+    url: &str,
+    payload: &serde_json::Value,
+    max_response_bytes: usize,
+) -> bool {
+    let Ok(mut response) = client.post(url).json(payload).send().await else {
+        return false;
+    };
+    if response.status() != reqwest::StatusCode::OK {
+        return false;
+    }
+    let mut body = Vec::new();
+    loop {
+        match response.chunk().await {
+            Ok(Some(chunk)) if body.len() + chunk.len() <= max_response_bytes => {
+                body.extend_from_slice(&chunk)
+            }
+            Ok(None) => break,
+            _ => return false,
+        }
+    }
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        return false;
+    };
+    if !value.is_object() {
+        return false;
+    }
+    match value.get("partialSuccess") {
+        None | Some(serde_json::Value::Null) => true,
+        Some(serde_json::Value::Object(fields)) => match fields.get("rejectedSpans") {
+            None => true,
+            Some(value) => value.as_u64() == Some(0) || value.as_str() == Some("0"),
+        },
+        _ => false,
     }
 }
 

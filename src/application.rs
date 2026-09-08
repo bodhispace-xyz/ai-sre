@@ -78,13 +78,20 @@ pub enum ApplicationError {
 pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), ApplicationError> {
     config.reasoning.admitted_providers = admitted_providers_from_environment();
     let reasoning_config = config.reasoning.clone();
+    let tracing_config = config.tracing.clone();
     let application = bootstrap::build(config)?;
     let journal_path = env::var_os("AI_SRE_JOURNAL_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("state/ai-sre.sqlite"));
     let (sender, mut receiver) = mpsc::channel::<IntakeCommand>(64);
-    let metrics = MetricsSnapshot::default();
-    let traces = TraceExporter::start(env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok(), 128);
+    let endpoint = crate::observability::tracing::resolve_endpoint(
+        env::var("OTEL_EXPORTER_OTLP_ENDPOINT").ok().as_deref(),
+        env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT")
+            .ok()
+            .as_deref(),
+    );
+    let traces = TraceExporter::configured(endpoint, tracing_config);
+    let metrics = MetricsSnapshot::with_traces(traces.clone());
     let worker_metrics = metrics.clone();
     let worker_traces = traces.clone();
     let pages = IncidentPages::default();
@@ -207,18 +214,6 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                 if let Some(span) = span_context("incident.investigation", "investigation") {
                     span.emit();
                 }
-                if let Some(exporter) = worker_traces.as_ref() {
-                    if let Some(event) = TraceEvent::new(
-                        &incident.incident_id,
-                        &run_id,
-                        "incident.investigation",
-                        "investigation",
-                        None,
-                        runtime.elapsed_ms(),
-                    ) {
-                        let _ = exporter.try_record(event);
-                    }
-                }
                 let global_budget_admitted = reserve_paid_budget(
                     dispatcher.journal_mut(),
                     &run_id,
@@ -272,11 +267,15 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                     if let Some(event) = TraceEvent::new(
                         &incident.incident_id,
                         &run_id,
-                        "incident.reasoning",
-                        "reasoning",
+                        "incident.investigation",
+                        "investigation",
                         None,
-                        runtime.elapsed_ms(),
+                        runtime.elapsed_ms().saturating_sub(start_at_ms),
                     ) {
+                        let event = match &result {
+                            Ok(result) => event.with_status(result.status),
+                            Err(_) => event.with_failure(),
+                        };
                         let _ = exporter.try_record(event);
                     }
                 }

@@ -103,9 +103,13 @@ pub fn span_context(name: &str, phase: &str) -> Option<SpanContext> {
 
 /// In-process snapshot shared by the worker and the metrics HTTP handler.
 #[derive(Clone, Default)]
-pub struct MetricsSnapshot(Arc<RwLock<String>>);
+pub struct MetricsSnapshot(Arc<RwLock<String>>, Option<tracing::TraceExporter>);
 
 impl MetricsSnapshot {
+    /// Attaches exporter loss accounting without adding incident labels.
+    pub fn with_traces(traces: Option<tracing::TraceExporter>) -> Self {
+        Self(Arc::default(), traces)
+    }
     /// Replaces the exposition snapshot after a durable journal update.
     pub async fn replace_from(&self, journal: &IncidentJournal) {
         *self.0.write().await = render_journal_metrics(journal);
@@ -113,7 +117,16 @@ impl MetricsSnapshot {
 
     /// Returns the latest exposition payload.
     pub async fn read(&self) -> String {
-        self.0.read().await.clone()
+        let mut output = self.0.read().await.clone();
+        if let Some(traces) = &self.1 {
+            metric(
+                &mut output,
+                "ai_sre_trace_dropped_total",
+                "Trace events lost to queue or export failure.",
+                traces.dropped_total(),
+            );
+        }
+        output
     }
 }
 
