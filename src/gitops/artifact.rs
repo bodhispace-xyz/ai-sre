@@ -170,7 +170,7 @@ impl ManualRepairCandidate {
         }
         let qualification_digest = qualified.receipt_digest();
         let description = format!(
-            "Manual repair candidate — not publish-ready.\n\nTarget: utility/it-tools; path: {PILOT_PATH}.\nBase: {}\nQualified deployment receipt: {qualification_digest}\nEvidence: {}\nExpected effect: restore the qualified immutable image.\nRollback: restore the previous image scalar only after fresh evidence and review.\nLocal scope: passed. Sandbox validation: not run. Remote checks: not run.\nNo PR was created; merge and deployment remain operator-owned.\n",
+            "Manual repair candidate — not publish-ready.\n\nTarget: utility/it-tools; path: {PILOT_PATH}.\nBase: {}\nQualified deployment receipt: {qualification_digest}\nEvidence: {}\nExpected effect: restore the qualified immutable image.\nRollback: restore the previous image scalar only after fresh evidence and review.\nLocal scope: passed. Sandbox validation: not run. Remote checks: not run.\nOperator application: after fresh validation and review, use a clean checkout at the exact base above. This secret-safe zero-context patch requires git apply --check --index --unidiff-zero before git apply --index --unidiff-zero. Stop on a changed base or failed check; never force or fuzz the patch. See packaging/validator/OPERATOR.md in ai-sre for the guarded procedure.\nNo PR was created; merge and deployment remain operator-owned.\n",
             request.expected_base, request.evidence_digest
         );
         Some(Self {

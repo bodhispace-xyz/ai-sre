@@ -505,7 +505,7 @@ mod tests {
         let receipt = fixture();
         let mut store = JournalStore::open(":memory:").unwrap();
         store.record_deployment(&receipt, 221).unwrap();
-        let source = "services:\n  it-tools:\n    image: ghcr.io/corentinth/it-tools:latest\n";
+        let source = "services:\n  it-tools:\n    image: ghcr.io/corentinth/it-tools:latest\n    restart: unless-stopped\n";
         let request = ManualRepairRequest {
             deployment_id: receipt.deployment_id(),
             incident_id: "incident-1",
@@ -537,6 +537,12 @@ mod tests {
         assert!(candidate.patch().contains(receipt.wire.image.as_str()));
         assert!(candidate.description().contains("not run"));
         assert!(candidate.description().contains(&receipt.wire.digest()));
+        assert!(candidate.description().contains("--unidiff-zero"));
+        assert!(
+            candidate
+                .description()
+                .contains("clean checkout at the exact base")
+        );
         // Then the operator can locate the incident and cite evidence without exporting its payload.
         let handoff: serde_json::Value = serde_json::from_str(&candidate.json()).unwrap();
         assert_eq!(
@@ -565,6 +571,23 @@ mod tests {
         std::fs::write(&target, source).unwrap();
         // When Git applies the explicitly zero-context patch to the captured source.
         use std::io::Write;
+        // A non-final image line needs the documented mode; default Git context checks reject it.
+        let mut ordinary = std::process::Command::new("/usr/bin/git")
+            .args(["apply", "--check", "-"])
+            .env_clear()
+            .current_dir(&checkout)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        ordinary
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(candidate.patch().as_bytes())
+            .unwrap();
+        assert!(!ordinary.wait().unwrap().success());
         let mut git = std::process::Command::new("/usr/bin/git")
             .args(["apply", "--unidiff-zero", "-"])
             .env_clear()
@@ -682,6 +705,61 @@ mod tests {
         );
         drop(prepared);
         assert!(!directory.exists());
+        // Given the exact operator procedure from the runbook and the actual generated patch.
+        let runbook = include_str!("../../../packaging/validator/OPERATOR.md");
+        let procedure = runbook
+            .split("<!-- begin guarded patch procedure -->")
+            .nth(1)
+            .unwrap()
+            .split("```sh\n")
+            .nth(1)
+            .unwrap()
+            .split("```")
+            .next()
+            .unwrap();
+        let patch_path = checkout.with_extension("patch");
+        std::fs::write(&patch_path, candidate.patch()).unwrap();
+        let apply = |at: &std::path::Path, expected_base: &str| {
+            std::process::Command::new("/bin/sh")
+                .args([
+                    "-c",
+                    &format!("{procedure}\napply_reviewed_patch \"$1\" \"$2\""),
+                    "operator-procedure",
+                    expected_base,
+                ])
+                .arg(&patch_path)
+                .env_clear()
+                .env("PATH", "/usr/bin:/bin")
+                .current_dir(at)
+                .output()
+                .unwrap()
+                .status
+                .success()
+        };
+        // When base identity, repository root, or clean-checkout preconditions are violated.
+        assert!(!apply(&checkout, &"f".repeat(40)));
+        assert!(!apply(&checkout.join("stacks"), base.trim()));
+        let dirty = source.replace("unless-stopped", "always");
+        std::fs::write(&target, &dirty).unwrap();
+        assert!(!apply(&checkout, base.trim()));
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), dirty);
+        std::fs::write(&target, source).unwrap();
+        std::fs::write(checkout.join("untracked"), "operator work").unwrap();
+        assert!(!apply(&checkout, base.trim()));
+        std::fs::remove_file(checkout.join("untracked")).unwrap();
+        // Then only the clean exact-base checkout is changed, and its staged bytes match validation.
+        assert!(apply(&checkout, base.trim()));
+        let expected = crate::gitops::it_tools_image::render(source, candidate.image()).unwrap();
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), expected);
+        assert_eq!(
+            String::from_utf8(git(&["show", ":stacks/utility/compose.yml"])).unwrap(),
+            expected
+        );
+        assert_eq!(
+            String::from_utf8(git(&["diff", "--cached", "--name-only"])).unwrap(),
+            "stacks/utility/compose.yml\n"
+        );
+        std::fs::remove_file(patch_path).unwrap();
         std::fs::remove_dir_all(checkout).unwrap();
     }
 

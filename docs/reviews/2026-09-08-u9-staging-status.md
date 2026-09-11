@@ -870,6 +870,33 @@ Clippy, doctests, rustdoc, and cargo-deny passed. `git diff --check` passed. The
 current branch still shares the latest `develop` base, `b947ebc`, checked before
 preparing the single draft review PR. This batch does not claim full U9 completion.
 
+## PR #25 patch-application review fix
+
+The review overstated the test gap: an existing test already applied the actual
+generated patch with `--unidiff-zero`. The missing pieces were operator guidance
+and a fixture whose image line was followed by more configuration.
+
+New candidate descriptions name the required application mode and exact-base,
+clean-checkout requirement. The operator runbook provides a guarded procedure
+that checks the complete base SHA, repository root, and tracked/untracked changes
+before checking, applying, and staging the patch. It does not approve, publish,
+or deploy the repair. Zero-context output remains intentional to avoid copying
+surrounding secrets into the artifact.
+
+The regression test executes that exact runbook procedure against the generated
+patch. It rejects a wrong base, a nested working directory, tracked edits, and
+untracked files; successful application produces the expected working-tree and
+index bytes. The fixture also demonstrates why ordinary context checks reject
+this patch format. Existing stored artifacts are not rewritten; the changed
+description affects newly generated candidate identities.
+
+Validation: `env NEXTEST_TEST_THREADS=2 make ci` passed: 212 tests passed,
+two opt-in Tempo tests skipped; formatting, Clippy, doctests, rustdoc, and
+cargo-deny passed. No dependencies were added or upgraded.
+
+The deferred operational items above remain deferred. This fix does not claim
+production readiness or full U9 completion.
+
 ## Research sources
 
 - [serde_yaml_ng 0.10.0 API](https://docs.rs/serde_yaml_ng/latest/): latest release

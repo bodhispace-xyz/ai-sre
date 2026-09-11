@@ -24,6 +24,35 @@ The JSON response includes the original candidate JSON, its patch and proposed P
 
 `cleanup_status` is `confirmed_by_receipt` only when the active attempt has a stored authenticated success receipt. Otherwise it is `unknown`, including after cancellation, process loss, or recovery. An SSH error does not prove remote cleanup failed or succeeded. Historical handoffs may still contain older receipts.
 
+## Apply a reviewed patch locally
+
+The patch deliberately contains no surrounding lines, which could contain secrets. Normal `git apply` expects context; this format requires [`--unidiff-zero`](https://git-scm.com/docs/git-apply#Documentation/git-apply.txt---unidiff-zero). Do not use that option for arbitrary patches.
+
+First obtain a freshly validated handoff through the trusted coordinator and review its exact patch, base, qualification, and evidence. Inspection alone does not reassess readiness. Decode the handoff's `patch` JSON string into a private file **outside the checkout**, preserving its bytes. Use its complete `base_sha`, not a branch name. Work in a separate clean checkout of that exact base, at its repository root. Do not edit the checkout or patch concurrently.
+
+The following function only applies and stages the reviewed patch locally. It does not fetch, commit, push, approve, or deploy. It refuses a changed base, any tracked or untracked changes, and a non-root working directory. On refusal, stop and obtain fresh evidence/validation; do not force, fuzz, or use three-way application.
+
+<!-- begin guarded patch procedure -->
+```sh
+apply_reviewed_patch() (
+    test "$#" -eq 2 || exit 2
+    expected_base=$1
+    reviewed_patch=$2
+    case "$reviewed_patch" in /*) ;; *) exit 2 ;; esac
+    prefix=$(git rev-parse --show-prefix) || exit 1
+    test -z "$prefix" || exit 1
+    current_base=$(git rev-parse --verify HEAD) || exit 1
+    test "$current_base" = "$expected_base" || exit 1
+    checkout_status=$(git status --porcelain=v1 --untracked-files=all) || exit 1
+    test -z "$checkout_status" || exit 1
+    git apply --check --index --unidiff-zero -- "$reviewed_patch" || exit 1
+    git apply --index --unidiff-zero -- "$reviewed_patch"
+)
+```
+<!-- end guarded patch procedure -->
+
+Call `apply_reviewed_patch FULL_BASE_SHA /absolute/private/reviewed.patch`, then inspect `git diff --cached`. Keep publication and deployment under the normal operator-owned review process. Acknowledging pickup is not authorization to apply or publish a repair.
+
 ## Acknowledge handoff pickup
 
 Inspection returns `handoff_digest` for the exact stored handoff and its existing `acknowledgement`, if any. After taking responsibility for reviewing that artifact, use:
