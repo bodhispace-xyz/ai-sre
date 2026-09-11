@@ -156,7 +156,7 @@ pub fn admit(
             })
         }
         (Gate::C, Some(previous))
-            if previous.gate == Gate::B
+            if previous.gate == Gate::A
                 && manifest.predecessor_digest.as_deref() == Some(previous.digest.as_str()) =>
         {
             Ok(AdmittedGate {
@@ -216,7 +216,7 @@ mod tests {
     }
 
     #[test]
-    fn gate_chain_requires_verified_immediate_predecessor() {
+    fn gitops_gate_depends_on_shadow_gate_not_runtime_mutation_authority() {
         // Given a verifier-backed Gate A followed by Gate B and Gate C.
         let gate_a = admit(&manifest(Gate::A, None), &binding(), 15, None).expect("Gate A");
         let gate_b = admit(
@@ -227,20 +227,20 @@ mod tests {
         )
         .expect("Gate B");
         let gate_c = admit(
-            &manifest(Gate::C, Some(gate_b.digest.clone())),
-            &binding(),
-            15,
-            Some(&gate_b),
-        )
-        .expect("Gate C");
-        // When Gate C is presented with Gate A as its predecessor.
-        let rejected = admit(
             &manifest(Gate::C, Some(gate_a.digest.clone())),
             &binding(),
             15,
             Some(&gate_a),
+        )
+        .expect("Gate C");
+        // When Gate C instead names runtime-mutation Gate B as its predecessor.
+        let rejected = admit(
+            &manifest(Gate::C, Some(gate_b.digest.clone())),
+            &binding(),
+            15,
+            Some(&gate_b),
         );
-        // Then only the exact ordered chain is accepted.
+        // Then GitOps is independently gated by shadow qualification, never runtime authority.
         assert_eq!(gate_c.gate, Gate::C);
         assert_eq!(rejected, Err(PromotionError::InvalidPredecessor));
     }

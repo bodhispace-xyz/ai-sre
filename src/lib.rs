@@ -9,6 +9,7 @@ pub mod adapters;
 pub mod application;
 pub mod bootstrap;
 pub mod config;
+pub mod gitops;
 pub mod observability;
 pub mod qualification;
 

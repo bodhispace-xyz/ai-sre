@@ -4,6 +4,9 @@
 //! policy, and notification delivery. Core reasoning modules remain focused
 //! on typed state transitions and do not need vendor adapter types.
 
+pub mod manual_repair;
+pub mod manual_repair_admin;
+
 use std::{
     env,
     net::SocketAddr,
@@ -98,6 +101,7 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
     let worker_pages = pages.clone();
     let (worker_failed, worker_failed_rx) = oneshot::channel();
     let mut dispatcher = IncidentDispatcher::new(JournalStore::open(journal_path)?);
+    let admin_listener = manual_repair_admin::AdminListener::from_environment()?;
     for report in dispatcher
         .journal()
         .stored_reports(crate::web::incidents::MAX_STORED_REPORTS)?
@@ -133,6 +137,7 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
     let rig_gate_accepted = env::var("RIG_GATE").ok().as_deref() == Some("accepted");
 
     let worker = tokio::spawn(async move {
+        let mut admin = admin_listener.map(manual_repair_admin::AdminService::start);
         drain_outbox(&mut dispatcher, ntfy.as_ref()).await;
         worker_metrics
             .replace_from(dispatcher.journal().journal())
@@ -153,6 +158,13 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                 Some(command) => Some(command),
                 None => {
                     tokio::select! {
+                        command = manual_repair_admin::next(&mut admin) => {
+                            match command {
+                                Some(command) => command.execute(dispatcher.journal_mut()),
+                                None => { eprintln!("local operator service failed"); break 'worker; }
+                            }
+                            continue 'worker;
+                        }
                         command = receiver.recv() => command,
                         _ = retry_tick.tick() => {
                             drain_outbox(&mut dispatcher, ntfy.as_ref()).await;
