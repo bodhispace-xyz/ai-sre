@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "MIT"
 description = "BodhiSpace AI SRE control-plane foundation"
+default-run = "ai-sre"
 
 [lib]
 path = "src/lib.rs"
@@ -17,11 +18,13 @@ path = "src/main.rs"
 axum = { version = "0.8.9", default-features = false, features = ["http1", "tokio"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+serde_yaml_ng = "0.10.0"
 sha2 = "0.11.0"
 thiserror = "2.0.20"
 reqwest = { version = "0.13.4", default-features = false, features = ["form", "json", "query", "rustls"] }
 rig-core = { version = "=0.41.0", default-features = false, features = ["derive", "reqwest", "rustls"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
+rustix = { version = "1.1.4", features = ["process"] }
 tokio = { version = "1.53.1", features = ["io-util", "macros", "net", "process", "rt", "sync", "time"] }
 
 [dev-dependencies]
