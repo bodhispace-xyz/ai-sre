@@ -4,6 +4,7 @@
 //! policy, and notification delivery. Core reasoning modules remain focused
 //! on typed state transitions and do not need vendor adapter types.
 
+pub mod deployment_intake;
 pub mod manual_repair;
 pub mod manual_repair_admin;
 
@@ -48,6 +49,9 @@ use crate::{
 /// Application startup and worker failures after configuration parsing.
 #[derive(Debug, Error)]
 pub enum ApplicationError {
+    /// Protected deployment evidence could not be configured or imported.
+    #[error(transparent)]
+    DeploymentIntake(#[from] deployment_intake::DeploymentIntakeError),
     /// Dependency assembly failed.
     #[error("application bootstrap failed")]
     Bootstrap(#[from] bootstrap::BootstrapError),
@@ -101,6 +105,8 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
     let worker_pages = pages.clone();
     let (worker_failed, worker_failed_rx) = oneshot::channel();
     let mut dispatcher = IncidentDispatcher::new(JournalStore::open(journal_path)?);
+    let mut deployment_intake = deployment_intake::DeploymentIntake::from_environment()?;
+    deployment_intake::refresh(&deployment_intake, dispatcher.journal_mut())?;
     let admin_listener = manual_repair_admin::AdminListener::from_environment()?;
     for report in dispatcher
         .journal()
@@ -158,6 +164,14 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                 Some(command) => Some(command),
                 None => {
                     tokio::select! {
+                        () = deployment_intake::next(&mut deployment_intake) => {
+                            if let Err(error) = deployment_intake::refresh(&deployment_intake, dispatcher.journal_mut()) {
+                                eprintln!("{error}");
+                                break 'worker;
+                            }
+                            worker_metrics.replace_from(dispatcher.journal().journal()).await;
+                            continue 'worker;
+                        }
                         command = manual_repair_admin::next(&mut admin) => {
                             match command {
                                 Some(command) => command.execute(dispatcher.journal_mut()),
@@ -195,6 +209,12 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                 .replace_from(dispatcher.journal().journal())
                 .await;
             for incident in incidents {
+                if let Err(error) =
+                    deployment_intake::refresh(&deployment_intake, dispatcher.journal_mut())
+                {
+                    eprintln!("{error}");
+                    break 'worker;
+                }
                 if !matches!(incident.status, AlertStatus::Firing) {
                     continue;
                 }

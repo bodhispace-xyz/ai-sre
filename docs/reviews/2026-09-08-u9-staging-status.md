@@ -926,6 +926,52 @@ deployed crash acceptance, and production enrollment remain unfinished. The
 homelab producer design still requires acceptance before activation; a merged
 staging PR does not establish those guarantees.
 
+## September 20: protected receipt intake
+
+The application now has an optional protected inbox importer. It reads at startup,
+on a configurable timer, and before each incident through the single journal
+owner. The directory scan has configurable entry and byte bounds. It reads every
+final receipt on each pass; there is no filename cursor that could hide a later
+revocation. Existing receipt and journal rules supply provenance, qualification,
+idempotency, contradiction handling, and durable revocation.
+
+The importer defaults to disabled. It neither invokes the repair coordinator nor
+grants source freshness or artifact readiness. [Inbox operations](../../packaging/validator/INBOX.md)
+defines final file names, temporary-file exclusion, publication, retention, and
+the deliberate fail-stop policy for an enabled inbox. A directory can be empty
+or readable while upstream delivery is incomplete; scan success is not an
+activation gate.
+
+The isolated Fedora VM passed the explicit root test
+`protected_linux_scan_ingests_revocation_and_rejects_unsafe_entries`. It exercised
+the production reader and journal with synthetic files: atomic publication,
+revocation, writable-file rejection, FIFO rejection, malformed JSON, and hard-link
+rejection. Three application-import contract tests also passed as `validator`.
+The test removed its root-owned fixture; the VM was stopped after acceptance.
+The separate source copy remains at `/home/validator/u9-inbox-Q8lFhu` for diagnosis.
+No homelab service, credential, or deployment was changed.
+
+Review focus before wiring repair dispatch:
+
+1. Must remain closed: receipt ingestion does not prove timely upstream delivery,
+   complete revocation delivery, Git freshness, or independent worker enrollment.
+   Do not connect scan success directly to repair dispatch.
+2. Safe to defer while dispatch is disabled: inbox retention/compaction and a
+   complete live producer-to-responder acceptance run. Overflow rejects ingestion;
+   deleting a file does not revoke the journal record.
+3. Deliberate decisions to review: enabled-inbox failure stops shadow investigation
+   too; each receipt commits separately, with worker termination on any commit
+   failure; filesystem reads require trusted local storage, not a network mount.
+
+This is a new trust-boundary review checkpoint, not full U9 completion. Source
+freshness, coordinator dispatch, deployed crash acceptance, and production
+enrollment remain unfinished. No dependency or action version changed here.
+
+Final local validation: `env NEXTEST_TEST_THREADS=2 make ci` passed with 218 tests
+and two opt-in Tempo tests skipped. Formatting, Clippy, doctests, rustdoc, and
+cargo-deny passed. The Linux-root test above ran separately rather than being
+counted as a skipped macOS test. `git diff --check` passed.
+
 ## Research sources
 
 - [serde_yaml_ng 0.10.0 API](https://docs.rs/serde_yaml_ng/latest/): latest release

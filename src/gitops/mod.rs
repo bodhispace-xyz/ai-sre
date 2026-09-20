@@ -2,6 +2,7 @@
 
 pub mod artifact;
 pub mod handoff;
+pub mod inbox;
 pub mod it_tools_image;
 pub mod qualified_deployment;
 pub mod receipt;

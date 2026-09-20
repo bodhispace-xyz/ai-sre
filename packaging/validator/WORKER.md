@@ -113,7 +113,9 @@ means reopening the journal, not a hard kill of the running responder. Neither a
 live Alertmanager incident nor a production deployment is exercised.
 
 The coordinator is not yet enabled by the incident loop or an operator endpoint.
-Deployment provisioning, live receipt ingestion, current-readiness assessment, and remote
+The application can import protected local receipts through the optional
+[deployment inbox](INBOX.md); this does not invoke the coordinator.
+Deployment provisioning, live producer delivery, current-readiness assessment, and remote
 Git freshness remain separate acceptance work. No homelab deployment is changed
 by building these entry points.
 
