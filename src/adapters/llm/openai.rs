@@ -265,7 +265,9 @@ pub fn normalize_rig_tool_call(
     call: &rig_core::completion::message::ToolCall,
 ) -> Result<ToolCall, crate::reasoning::tools::ToolLoopError> {
     parse_tool_call(
-        call.call_id.as_deref().unwrap_or(&call.id),
+        call.provider
+            .as_ref()
+            .map_or(call.id.as_str(), |provider| provider.call_id.as_str()),
         &call.function.name,
         &call.function.arguments.to_string(),
     )

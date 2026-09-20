@@ -46,8 +46,8 @@ jobs:
         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6
 
       - name: Install pinned CI tools
-        # taiki-e/install-action v2.85.11, verified 2026-08-11.
-        uses: taiki-e/install-action@7f4eb899022d8fe70b20c4f3de697aa85c309026
+        # taiki-e/install-action v2.87.17, verified 2026-09-21.
+        uses: taiki-e/install-action@94c31af3204a9f15ab40b35ad084410b905bbc73
         with:
           tool: cargo-nextest@0.9.143,cargo-deny@0.20.2
           fallback: none

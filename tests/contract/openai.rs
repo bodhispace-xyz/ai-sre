@@ -25,7 +25,7 @@ fn refresh_session_rotates_without_exposing_tokens_in_debug_output() {
 fn rig_tool_call_normalization_keeps_datasource_policy_out_of_provider_arguments() {
     // Given a Rig tool call containing only a model-authored LogQL expression.
     let call = rig_core::completion::message::ToolCall::new(
-        "tool-1".to_owned(),
+        rig_core::completion::message::ToolCallId::new("tool-1").unwrap(),
         rig_core::completion::message::ToolFunction::new(
             "query_logs".to_owned(),
             serde_json::json!({"query":"{app=\"api\"}"}),
