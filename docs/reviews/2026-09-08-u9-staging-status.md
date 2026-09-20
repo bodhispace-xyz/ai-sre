@@ -897,6 +897,35 @@ cargo-deny passed. No dependencies were added or upgraded.
 The deferred operational items above remain deferred. This fix does not claim
 production readiness or full U9 completion.
 
+## September 20: operational completion branch
+
+PR #25 merged into `develop` at `6d5396f`. Follow-up implementation starts on
+`feat/u9-operational-completion`, from that exact base. No new PR or production
+activation is part of this checkpoint.
+
+The worker now checks that its configuration leaf is a regular file and that
+all ancestors are directories before opening it. This closes the deferred FIFO
+startup-blocking gap. A test covers regular files, directories, symlinks, and a
+real FIFO without opening the FIFO. Root ownership and mode checks remain intact.
+Root and the protected configuration publisher remain trusted.
+
+The first CI run passed 213 tests but failed the advisory gate on the existing
+rustls 0.23.43 lock entry. [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285)
+was published after the previous batch's verification. The lockfile now selects
+[rustls 0.23.45](https://github.com/rustls/rustls/releases/tag/v/0.23.45) and
+[rustls-webpki 0.103.15](https://github.com/rustls/webpki/releases/tag/v/0.103.15).
+Both upstream latest-release pages were checked before completing this update.
+No advisory exception was added.
+
+The repeat `env NEXTEST_TEST_THREADS=2 make ci` passed: 213 tests, two opt-in
+Tempo tests skipped, and all formatting, lint, documentation, and dependency
+gates passed. No live deployment acceptance was run for this checkpoint.
+
+Receipt delivery and revocation, source-mirror freshness, incident-loop wiring,
+deployed crash acceptance, and production enrollment remain unfinished. The
+homelab producer design still requires acceptance before activation; a merged
+staging PR does not establish those guarantees.
+
 ## Research sources
 
 - [serde_yaml_ng 0.10.0 API](https://docs.rs/serde_yaml_ng/latest/): latest release

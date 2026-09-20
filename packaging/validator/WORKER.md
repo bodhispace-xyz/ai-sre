@@ -18,6 +18,8 @@ credential, or private SSH key.
 
 - Install the worker binary and JSON configuration under root-owned, non-writable
   paths. The binary checks configuration path ownership and rejects symlinks.
+  The configuration must be a regular file, and its ancestors must be directories.
+  These checks run before opening the file, so a protected FIFO cannot block startup.
 - Set `AI_SRE_VALIDATOR_CONFIG` in the protected forced command. The worker requires
   `SSH_ORIGINAL_COMMAND=ai-sre-validator-v1`, as supplied by sshd. Do not accept
   client environment overrides. Provision a valid rootless `HOME`, runtime
