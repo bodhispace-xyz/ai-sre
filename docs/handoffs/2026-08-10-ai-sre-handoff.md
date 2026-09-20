@@ -2,6 +2,14 @@
 
 ## Purpose of the next session
 
+**2026-09-08 U9 scope update:** Implement credential-free repair preparation and
+manual PR publishing first. The operator reviews the artifact and uses their own
+GitHub session; AI-SRE must not access that session. Qualified deployment evidence,
+one-field scope, offline validation, base binding, redaction, and durable handoff
+still apply. Bot identities, automated publishing, and Gate C canaries are deferred,
+not waived for future automation. This update supersedes initial-delivery wording
+about automatic GitHub writes below; see the U9 section of the canonical plan.
+
 Continue BodhiSpace AI SRE from the completed product contract and reviewed implementation-ready MVP plan into the **first shadow-mode implementation slice**. The 2026-08-10 architecture review resolved all open items with research-backed decisions; do not restart architecture selection unless a committed U0 no-go criterion disproves a documented assumption.
 
 The 2026-08-11 deep-review follow-up ledger is tracked in
@@ -52,7 +60,7 @@ The plan is authoritative; do not duplicate its requirements. In particular, pre
 - Promotion uses three canonical offline-Cosign-signed manifests: Gate A for shadow quality, Gate B before the IT Tools runtime credential/policy, and Gate C before GitHub proposal credentials are issued. The image pins the trust root and the service enforces expiry, predecessor, version, generation, and revocation bindings.
 - Static projected secrets are atomic `0400` files; the rotating OpenAI OAuth cache is separately writable `0600` under a backup-excluded `0700` directory; the root/gateway-owned external epoch is separately readable. PBS restore scans prove credentials are absent, require reauthentication, and keep mutation quarantined.
 - OAuth bootstrap, quarantine/lease clearance, and manual takeover exist only on an OS-authorized local Unix socket for root or `ai-sre-operators`; peer identity, reason, evidence, and result are journaled and failures remain closed.
-- U9/Gate C ships as Release 1.2 after Gate A and before runtime mutation. Its prerequisite repairs the currently empty homelab `lint-tofu`, `lint-ansible`, and `lint-compose` Make recipes so local `make ci` matches substantive remote validation.
+- U9/Gate C ships as Release 1.2 after Gate A and before runtime mutation. Offline image acceptance now runs the substantive homelab `make ci` recipes through the Rust rootless runner against an archived `fafa318` tree. This is isolated Linux/ARM64 acceptance, not worker deployment or production enrollment. See `docs/reviews/2026-09-08-u9-staging-status.md` for evidence and remaining U9 work.
 - “Self-improvement” means offline/replay evaluation and reviewed promotion of prompts, policies, models, or code—not live production self-modification.
 
 ## AI-SRE repository state

@@ -1,0 +1,32 @@
+#!/bin/sh
+# Assert the actual sandbox boundary, not substantive homelab validation.
+set -eu
+
+# Given only a read-only source snapshot and bounded writable scratch.
+test "$(id -u)" = 65532
+test -r /source/stacks/utility/compose.yml
+test ! -e /source/.git
+test ! -e /root/.ssh
+test ! -e /home/validator
+test -z "${SSH_AUTH_SOCK:-}"
+test -z "${GITHUB_TOKEN:-}"
+test -z "${OPENAI_API_KEY:-}"
+
+# When the workload inspects its kernel-enforced privileges and resource limits.
+grep -Eq '^NoNewPrivs:[[:space:]]+1$' /proc/self/status
+grep -Eq '^CapEff:[[:space:]]+0+$' /proc/self/status
+grep -Eq '^Seccomp:[[:space:]]+2$' /proc/self/status
+test "$(cat /sys/fs/cgroup/memory.max)" = 536870912
+test "$(cat /sys/fs/cgroup/memory.swap.max)" = 0
+test "$(cat /sys/fs/cgroup/pids.max)" = 128
+test "$(cat /sys/fs/cgroup/cpu.max)" = '100000 100000'
+test "$(ls /sys/class/net)" = lo
+
+# Then source/root writes fail, while the three explicitly bounded scratch mounts work.
+if touch /source/unexpected 2>/dev/null; then exit 1; fi
+if touch /unexpected 2>/dev/null; then exit 1; fi
+touch /work/probe /tmp/probe /dev/shm/probe
+test "$(df -k /work | tail -1 | awk '{print $2}')" = 229376
+test "$(df -k /tmp | tail -1 | awk '{print $2}')" = 16384
+test "$(df -k /dev/shm | tail -1 | awk '{print $2}')" = 16384
+printf '%s\n' 'containment fixture passed; homelab CI was not run'

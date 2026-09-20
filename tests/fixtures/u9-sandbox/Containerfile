@@ -1,0 +1,7 @@
+# Containment fixture only: this image does not run homelab CI or qualify repairs.
+# Pass an inspected immutable Alpine reference; the build has no package-install step.
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE}
+COPY --chmod=0555 validate-u9 /usr/local/bin/validate-u9
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/validate-u9"]

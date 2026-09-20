@@ -151,6 +151,90 @@ pub fn render_journal_metrics(journal: &IncidentJournal) -> String {
     let mut output = String::new();
     metric(
         &mut output,
+        "ai_sre_manual_validation_timed_failed_responses_total",
+        "Response errors with a measured wait, including measured zero.",
+        projection.manual_validation_timed_failed_responses,
+    );
+    metric(
+        &mut output,
+        "ai_sre_manual_handoff_acknowledgements_total",
+        "Explicit operator pickups, not repair approvals.",
+        projection.manual_handoff_acknowledgements,
+    );
+    metric(
+        &mut output,
+        "ai_sre_manual_handoff_timed_acknowledgements_total",
+        "Pickup waits with non-regressing server wall timestamps.",
+        projection.manual_handoff_timed_acknowledgements,
+    );
+    metric(
+        &mut output,
+        "ai_sre_manual_handoff_wait_seconds_total",
+        "Wall-clock handoff creation-to-pickup wait, including downtime; not active human effort.",
+        projection.manual_handoff_wait_seconds,
+    );
+    metric(
+        &mut output,
+        "ai_sre_manual_validation_failed_responses_total",
+        "Observed response errors; remote execution and cleanup outcomes remain unknown.",
+        projection.manual_validation_failed_responses,
+    );
+    metric(
+        &mut output,
+        "ai_sre_manual_validation_failed_response_ms_total",
+        "Measured response waits ending in errors; excludes cancelled or killed waits.",
+        projection.manual_validation_failed_response_ms,
+    );
+    metric(
+        &mut output,
+        "ai_sre_manual_validation_cleanup_confirmations_total",
+        "Stored authenticated success receipts confirming worker cleanup for their attempts.",
+        projection.manual_validation_receipts,
+    );
+    metric(
+        &mut output,
+        "ai_sre_manual_validation_response_ms_total",
+        "Measured successful validation response wait in milliseconds; excludes failed and cancelled attempts.",
+        projection.manual_validation_response_ms,
+    );
+    metric(
+        &mut output,
+        "ai_sre_manual_validation_timed_receipts_total",
+        "Receipts with measured response wait, including measured zero; excludes missing legacy timings.",
+        projection.manual_validation_timed_receipts,
+    );
+    metric(
+        &mut output,
+        "ai_sre_manual_validation_reservations_total",
+        "Durable validation reservations; dispatch and remote outcomes may be unknown.",
+        projection.manual_validation_reservations,
+    );
+    metric(
+        &mut output,
+        "ai_sre_manual_validation_receipts_total",
+        "Authenticated validation receipts stored; not necessarily eligible handoffs.",
+        projection.manual_validation_receipts,
+    );
+    metric(
+        &mut output,
+        "ai_sre_manual_validation_recoveries_total",
+        "Accepted operator recoveries; not remote cleanup confirmations or new dispatches.",
+        projection.manual_validation_recoveries,
+    );
+    metric(
+        &mut output,
+        "ai_sre_manual_repair_preparations_total",
+        "Durable repair preparation facts; not validation attempts or publications.",
+        projection.manual_repair_preparations,
+    );
+    metric(
+        &mut output,
+        "ai_sre_manual_repair_validated_handoffs_total",
+        "Historical validated handoffs; not current readiness, delivery acknowledgements, or resolutions.",
+        projection.manual_repair_validated_handoffs,
+    );
+    metric(
+        &mut output,
         "ai_sre_incidents_opened_total",
         "Total normalized firing incidents.",
         incidents_opened,

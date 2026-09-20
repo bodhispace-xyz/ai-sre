@@ -23,9 +23,85 @@ pub enum Phase {
     Execution,
 }
 
+/// Bounded explanation of a protected deployment qualification decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeploymentQualificationReason {
+    /// Protected evidence passed the current qualification policy.
+    Qualified,
+    /// The first receipt failed deployment, identity, timing, or health assessment.
+    FailedInitialAssessment,
+    /// The protected producer explicitly revoked the deployment.
+    Revoked,
+    /// A previously qualified identity arrived with different receipt contents.
+    ContradictoryReceipt,
+}
+
 /// Raw append-only fact for an incident.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum JournalEvent {
+    /// Explicit operator pickup of an exact historical handoff, not approval or readiness.
+    ManualHandoffAcknowledged {
+        /// Exact handoff identity acknowledged by the operator.
+        handoff_digest: String,
+        /// Candidate identity for incident correlation.
+        artifact_digest: String,
+        /// Kernel-authenticated operator UID; never exported as a metrics label.
+        operator_uid: u32,
+        /// Kernel-authenticated effective primary GID.
+        operator_gid: u32,
+        /// Durable handoff creation time, not a notification delivery claim.
+        offered_at_unix_seconds: u64,
+        /// Server-observed pickup time; clock regression leaves duration unknown.
+        acknowledged_at_unix_seconds: u64,
+    },
+    /// Records an atomic validation-state transition, without raw requests or operator explanations.
+    ManualValidation {
+        /// Candidate correlation identity, not a metrics label.
+        artifact_digest: String,
+        /// Digest of the exact reserved request, distinguishing explicit revalidation attempts.
+        request_digest: String,
+        /// Durable transition; none implies publication or incident resolution.
+        stage: ManualValidationStage,
+        /// Source Unix second, when available; never a monotonic duration.
+        at_unix_seconds: Option<u64>,
+        /// Responder-measured monotonic wait for a success or error, excluding journal I/O.
+        /// Missing on older receipts and stages without a response; missing is not measured zero.
+        #[serde(default)]
+        response_elapsed_ms: Option<u64>,
+    },
+    /// Records validated operator handoff, not publication, merge, deployment, or incident resolution.
+    ManualRepairValidated {
+        /// Canonical validated handoff identity.
+        handoff_digest: String,
+        /// Previously prepared candidate identity.
+        artifact_digest: String,
+        /// Unix second of durable handoff.
+        at_unix_seconds: u64,
+    },
+    /// Records preparation of a candidate, not successful validation, publication, or resolution.
+    ManualRepairPrepared {
+        /// Canonical artifact identity.
+        artifact_digest: String,
+        /// Receipt identity binding the selected image to qualified deployment evidence.
+        qualification_digest: String,
+        /// Unix second of durable preparation.
+        at_unix_seconds: u64,
+    },
+    /// Records the durable qualification or permanent invalidation of a protected deployment.
+    DeploymentQualification {
+        /// Stable producer event identity.
+        deployment_id: String,
+        /// Digest of the exact observed receipt, not raw health payloads.
+        receipt_digest: String,
+        /// Whether this receipt was eligible at the recorded time.
+        eligible: bool,
+        /// Why eligibility was recorded; absent only on legacy events.
+        #[serde(default)]
+        reason: Option<DeploymentQualificationReason>,
+        /// Unix time of assessment, distinct from incident monotonic timing.
+        at_unix_seconds: u64,
+    },
     /// Records the first signal for a normalized incident.
     IncidentOpened {
         /// Stable incident identity.
@@ -101,6 +177,9 @@ pub enum JournalEvent {
         evidence_id: String,
         /// Source capability that produced the record.
         source: super::evidence::EvidenceSource,
+        /// Canonical redacted-record identity. Legacy facts without it cannot support a repair.
+        #[serde(default)]
+        content_digest: Option<String>,
         /// Monotonic commit timestamp in milliseconds.
         at_ms: u64,
     },
@@ -163,6 +242,19 @@ pub enum JournalEvent {
         /// Provider that produced the terminal report, if any.
         provider: Option<ProviderKind>,
     },
+}
+
+/// Durable responder-side milestones, distinct from the remote worker's execution status.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ManualValidationStage {
+    /// The responder received an error; the remote execution and cleanup outcome remain unknown.
+    ResponseFailed,
+    /// Reservation committed before SSH; dispatch or execution may not have happened.
+    Reserved,
+    /// An authenticated bound receipt was stored, before current handoff checks.
+    ReceiptReceived,
+    /// An operator archived the old attempt and permitted a new reservation, not automatic dispatch.
+    RecoveryAuthorized,
 }
 
 /// Bounded facts captured for one model-directed context call.
@@ -274,6 +366,20 @@ impl IncidentJournal {
                 continue;
             }
             match &entry.event {
+                JournalEvent::ManualHandoffAcknowledged {
+                    offered_at_unix_seconds,
+                    acknowledged_at_unix_seconds,
+                    ..
+                } => {
+                    projection.manual_handoff_acknowledgements += 1;
+                    if let Some(wait) =
+                        acknowledged_at_unix_seconds.checked_sub(*offered_at_unix_seconds)
+                    {
+                        projection.manual_handoff_timed_acknowledgements += 1;
+                        projection.manual_handoff_wait_seconds =
+                            projection.manual_handoff_wait_seconds.saturating_add(wait);
+                    }
+                }
                 JournalEvent::IncidentOpened { .. }
                 | JournalEvent::AlertDeduplicated { .. }
                 | JournalEvent::AlertOutOfOrder { .. }
@@ -281,7 +387,44 @@ impl IncidentJournal {
                 | JournalEvent::IncidentCompleted { .. }
                 | JournalEvent::IncidentResumed { .. }
                 | JournalEvent::EvidenceCommitted { .. } => {}
-                JournalEvent::ToolRequested { .. } => {}
+                JournalEvent::ToolRequested { .. }
+                | JournalEvent::DeploymentQualification { .. } => {}
+                JournalEvent::ManualRepairPrepared { .. } => {
+                    projection.manual_repair_preparations += 1;
+                }
+                JournalEvent::ManualRepairValidated { .. } => {
+                    projection.manual_repair_validated_handoffs += 1;
+                }
+                JournalEvent::ManualValidation {
+                    stage,
+                    response_elapsed_ms,
+                    ..
+                } => match stage {
+                    ManualValidationStage::ResponseFailed => {
+                        projection.manual_validation_failed_responses += 1;
+                        if let Some(elapsed) = response_elapsed_ms {
+                            projection.manual_validation_timed_failed_responses += 1;
+                            projection.manual_validation_failed_response_ms = projection
+                                .manual_validation_failed_response_ms
+                                .saturating_add(*elapsed);
+                        }
+                    }
+                    ManualValidationStage::Reserved => {
+                        projection.manual_validation_reservations += 1
+                    }
+                    ManualValidationStage::ReceiptReceived => {
+                        projection.manual_validation_receipts += 1;
+                        if let Some(elapsed) = response_elapsed_ms {
+                            projection.manual_validation_timed_receipts += 1;
+                            projection.manual_validation_response_ms = projection
+                                .manual_validation_response_ms
+                                .saturating_add(*elapsed);
+                        }
+                    }
+                    ManualValidationStage::RecoveryAuthorized => {
+                        projection.manual_validation_recoveries += 1
+                    }
+                },
                 JournalEvent::ToolContext {
                     elapsed_ms,
                     output_bytes,
@@ -323,6 +466,34 @@ impl IncidentJournal {
 /// Replayable efficiency metrics derived from journal facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EfficiencyProjection {
+    /// Recorded errors with a measured wait; missing durations are not zero-valued samples.
+    pub manual_validation_timed_failed_responses: u64,
+    /// Exact historical handoffs explicitly picked up by an operator, not approved repairs.
+    pub manual_handoff_acknowledgements: u64,
+    /// Pickup waits with non-regressing server wall timestamps.
+    pub manual_handoff_timed_acknowledgements: u64,
+    /// Wall-clock handoff creation-to-pickup wait, including downtime; not active human effort.
+    pub manual_handoff_wait_seconds: u64,
+    /// Recorded response errors, not proof that remote execution failed or stopped.
+    pub manual_validation_failed_responses: u64,
+    /// Measured responder wait ending in an error; never inferred from restart gaps.
+    pub manual_validation_failed_response_ms: u64,
+    /// Receipts with measured response time, including measurements rounded down to zero milliseconds.
+    pub manual_validation_timed_receipts: u64,
+    /// Sum of measured successful response waits; excludes failed/cancelled attempts and journal I/O.
+    /// This is elapsed wall duration measured monotonically, not CPU time or total repair time.
+    pub manual_validation_response_ms: u64,
+    /// Durable reservations, including attempts whose dispatch or remote outcome is unknown.
+    pub manual_validation_reservations: u64,
+    /// Authenticated receipts stored; these are not necessarily eligible handoffs.
+    pub manual_validation_receipts: u64,
+    /// Accepted operator recoveries, not verified remote cleanup or new dispatches.
+    pub manual_validation_recoveries: u64,
+    /// Durable candidate-preparation facts, not validation attempts or published repairs.
+    pub manual_repair_preparations: u64,
+    /// Durable validated handoffs, not delivery acknowledgements or resolved incidents.
+    /// Historical handoffs remain counted after expiry or qualification revocation.
+    pub manual_repair_validated_handoffs: u64,
     /// Latest completed phase timestamp relative to the incident epoch.
     pub end_to_end_ms: u64,
     /// Sum of non-human phase durations.

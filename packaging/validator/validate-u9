@@ -1,0 +1,20 @@
+#!/bin/sh
+# Runs repository checks in scratch. Isolation, deadlines and result binding belong to Rust.
+set -eu
+
+# Optional paths let ordinary tests exercise the entrypoint without mounting host directories.
+# Production invokes this entrypoint without arguments inside the admitted container.
+test "$#" -le 2
+source_directory=${1:-/source}
+scratch_directory=${2:-/work}
+mkdir "$scratch_directory/repository"
+cp -R "$source_directory/." "$scratch_directory/repository/"
+
+# Do not inherit Make options, provider credentials or host tool configuration.
+exec env -i PATH=/usr/local/bin:/usr/bin:/bin \
+    TF_CLI_CONFIG_FILE=/etc/ai-sre-validator/tofurc TF_IN_AUTOMATION=1 TF_INPUT=0 \
+    ANSIBLE_HOME="$scratch_directory/ansible" \
+    ANSIBLE_COLLECTIONS_PATH=/opt/ansible/collections \
+    ANSIBLE_LOCAL_TEMP="$scratch_directory/ansible/tmp" \
+    CHECKPOINT_DISABLE=1 \
+    make -C "$scratch_directory/repository" ci

@@ -151,7 +151,12 @@ impl IncidentDispatcher {
                 | JournalEvent::PhaseStarted { .. }
                 | JournalEvent::PhaseFinished { .. }
                 | JournalEvent::ProviderAttempt(_)
-                | JournalEvent::Terminal { .. } => {}
+                | JournalEvent::Terminal { .. }
+                | JournalEvent::DeploymentQualification { .. }
+                | JournalEvent::ManualRepairPrepared { .. }
+                | JournalEvent::ManualValidation { .. }
+                | JournalEvent::ManualHandoffAcknowledged { .. }
+                | JournalEvent::ManualRepairValidated { .. } => {}
             }
         }
         Self { journal, lifecycle }

@@ -1313,7 +1313,33 @@ These are follow-up implementation and deployment gates, not hidden U0 acceptanc
 
 ### U9 — Pilot-Scoped Typed GitOps Repair
 
-**Goal:** Turn one proven recurring desired-state correction into a reviewable draft PR without giving the model patch or deployment authority.
+**Scope decision — 2026-09-08:** Ship manual publishing first. AI-SRE prepares a
+local repair artifact and proposed PR description; an operator reviews it and
+publishes through their own GitHub session. The service receives no GitHub write
+credentials and never reads or invokes the operator's authenticated `gh` session.
+This decision supersedes automatic-publishing requirements elsewhere in this
+plan for the initial U9 release only. It does not weaken qualification, diff
+scope, validation, or runtime-mutation gates.
+
+**Initial release acceptance:** Prove durable deployment qualification, the
+one-field renderer, incident/evidence/base bindings, bounded offline validation,
+redaction, and journaled artifact handoff. Include the patch, source/base SHA,
+artifact digest, evidence citations, validation result, expected effect, rollback
+path, and suggested PR title/body. Missing qualification or failed validation
+produces a recommendation, not a publish-ready repair. Base movement requires
+fresh evidence and validation. Artifact delivery is not PR creation, merge,
+deployment, or incident resolution. Record remote checks as not run until real
+results exist; normal repository review and CI still apply when a human publishes.
+
+**Deferred automated-publishing extension:** Fork-writing credentials, separate
+PR identity, GitHub write adapter, uncertain-creation reconciliation, automated
+branch cleanup, permission-denial canary, and signed Gate C admission. These are
+not prerequisites for local preparation or manual handoff. Gate C remains
+mandatory before the service receives any GitHub write authority; a future
+simpler App-only identity design needs review and real permission tests. The
+original approach and test scenarios below retain that extension's requirements.
+
+**Goal:** Turn one proven recurring desired-state correction into a reviewable repair artifact, with operator-owned PR publishing and no model patch or deployment authority.
 
 **Requirements:** R18-R20, R23-R25, R27; covers AE7, AE8, and AE12.
 
@@ -1340,7 +1366,7 @@ These are follow-up implementation and deployment gates, not hidden U0 acceptanc
 1. Accept only a typed repair: replace `services.it-tools.image` with the exact immutable digest from a durable qualified-deployment record. Populate that record only from a protected deployment-completion event joined deterministically to the deployed commit/digest and a predeclared strict post-completion Gatus/Prometheus observation window; model claims and Git history alone cannot qualify it. If no current valid record exists, return an evidence-backed recommendation only.
 2. Resolve repository/base SHA and qualified revision from read-only Git/deployment evidence. Bind renderer input and PR metadata to incident, proposal digest, evidence digest, qualified-deployment record, and base SHA.
 3. Generate the diff deterministically; parse and verify that only the permitted scalar changed. The model never supplies YAML, a patch, branch name, command, or arbitrary file path.
-4. Before U9 acceptance, implement the currently recipe-less homelab `lint-tofu`, `lint-ansible`, and `lint-compose` targets with the same commands and pinned/preloaded tools as remote CI. Run substantive `make ci` in a pinned rootless sandbox with no AI-SRE secrets, journal/OAuth mounts, SSH agent, or outbound network; mount source read-only with disposable scratch and cap CPU, memory, processes, output, and time. Import only the bounded result. On base movement, merge conflict, or preflight failure, stop and rebuild from fresh Git evidence rather than force-push or auto-resolve.
+4. Before U9 acceptance, verify the homelab `lint-tofu`, `lint-ansible`, and `lint-compose` recipes against authoritative remote CI and preload their pinned dependencies. These recipes exist on homelab `main` as of 2026-09-08; an older local checkout is not authoritative. Run substantive `make ci` in a pinned rootless sandbox with no AI-SRE secrets, journal/OAuth mounts, SSH agent, or outbound network; mount source read-only with disposable scratch and cap CPU, memory, processes, output, and time. Import only the bounded result. On base movement, merge conflict, or preflight failure, stop and rebuild from fresh Git evidence rather than force-push or auto-resolve.
 5. Write the generated branch only to a dedicated bot-owned fork through a GitHub App installed on that fork with `contents: write` and no base-repository installation. A separate short-lived user-context token acts as a dedicated machine user whose base-repository role is read-only and may only open/reconcile the draft PR from the fork. The machine user has no base contents write, approval, merge, workflow, deployment, administration, or bypass role. Set `maintainer_can_modify=false` and delete the bot feature branch after the PR is merged or closed.
 6. Split remote validation. The ordinary fork `pull_request` workflow runs static/build validation with read-only repository access and no secrets, privileged network, OIDC write, or deployment capability. Any secret-bearing plan is a separately approved protected-environment job that runs base-controlled workflow/scripts, pins the reviewed head SHA, validates the exact one-field OCI-digest diff as data, and never checks out or executes head-controlled scripts. Artifacts from the untrusted workflow remain untrusted input.
 7. After draft creation, wait for and record both validation results. A failed or missing check leaves a visible non-mergeable failed draft and never becomes a success or deployment request.
@@ -1542,6 +1568,9 @@ Rollback reverses authority first: disable/revoke GitHub and forced-gateway cred
 
 ### Release 1.2 — Typed GitOps Draft PR
 
+- Initial U9 uses manual publishing under the 2026-09-08 scope decision above.
+  AI-SRE prepares and journals the validated artifact; the operator reviews and
+  publishes it. The automated-publishing requirements below remain deferred.
 - Complete U9 after Gate A, before runtime mutation authority.
 - Repair the homelab `make ci` targets, split untrusted and privileged validation, and pass the disposable-repository permission canary.
 - Verify signed Gate C before issuing the production bot-fork and read-role PR credentials. The first production artifact is draft-only and operator-reviewed; merge and deployment stay protected and external.

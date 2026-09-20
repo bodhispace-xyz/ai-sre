@@ -75,9 +75,15 @@ impl IncidentRuntime {
         at_ms: u64,
     ) -> Result<String, RuntimeError> {
         let evidence_id = self.evidence.commit(source, query, payload)?;
+        let content_digest = self
+            .evidence
+            .records()
+            .last()
+            .map(|record| record.content_digest());
         self.journal.append(JournalEvent::EvidenceCommitted {
             evidence_id: evidence_id.clone(),
             source,
+            content_digest,
             at_ms,
         });
         Ok(evidence_id)
@@ -95,9 +101,15 @@ impl IncidentRuntime {
         let evidence_id = self
             .evidence
             .commit_with_metadata(source, query, payload, metadata)?;
+        let content_digest = self
+            .evidence
+            .records()
+            .last()
+            .map(|record| record.content_digest());
         self.journal.append(JournalEvent::EvidenceCommitted {
             evidence_id: evidence_id.clone(),
             source,
+            content_digest,
             at_ms,
         });
         Ok(evidence_id)

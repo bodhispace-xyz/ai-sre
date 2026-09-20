@@ -78,6 +78,19 @@ pub struct EvidenceRecord {
     pub metadata: EvidenceMetadata,
 }
 
+impl EvidenceRecord {
+    /// Binds the complete redacted record, including source, query, payload, and outcome metadata.
+    pub fn content_digest(&self) -> String {
+        use sha2::{Digest, Sha256};
+        let bytes = serde_json::to_vec(self).expect("evidence record serialization is infallible");
+        let hex: String = Sha256::digest(bytes)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        format!("sha256:{hex}")
+    }
+}
+
 /// Evidence-board failures that preserve the previous immutable board.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
 pub enum EvidenceError {

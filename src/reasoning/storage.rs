@@ -14,6 +14,15 @@ use thiserror::Error;
 
 use super::journal::{IncidentJournal, JournalContext, JournalEntry, JournalEvent};
 
+mod gitops;
+mod manual_ack;
+mod manual_validation;
+#[cfg(test)]
+pub(crate) use gitops::fixture_evidence;
+pub use manual_validation::{
+    ManualRepairArtifact, ManualValidationAttempt, ManualValidationRecovery, ManualValidationState,
+};
+
 /// Fail-closed storage errors for the incident journal and outbox.
 #[derive(Debug, Error)]
 pub enum JournalStoreError {
@@ -32,6 +41,9 @@ pub enum JournalStoreError {
     /// A reconciliation referenced no durable reservation.
     #[error("durable cost reservation was not found")]
     ReservationNotFound,
+    /// Protected or persisted deployment evidence failed validation.
+    #[error("invalid deployment qualification evidence")]
+    InvalidDeployment,
 }
 
 /// A pending notification intent stored transactionally with incident state.
@@ -86,7 +98,43 @@ impl JournalStore {
         connection.pragma_update(None, "journal_mode", "WAL")?;
         connection.pragma_update(None, "synchronous", "FULL")?;
         connection.execute_batch(
-            "CREATE TABLE IF NOT EXISTS journal_events (
+            "CREATE TABLE IF NOT EXISTS deployment_receipt_audit (
+                receipt_digest TEXT PRIMARY KEY,
+                receipt_json TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS manual_repair_handoffs (
+                handoff_digest TEXT PRIMARY KEY,
+                handoff_json TEXT NOT NULL
+             );
+             CREATE TABLE IF NOT EXISTS manual_repair_candidates (
+                artifact_digest TEXT PRIMARY KEY,
+                candidate_json TEXT NOT NULL
+             );
+             CREATE INDEX IF NOT EXISTS manual_handoff_candidate ON manual_repair_handoffs(json_extract(handoff_json,'$.candidate_digest'));
+             CREATE TABLE IF NOT EXISTS manual_validation_attempts (
+                artifact_digest TEXT PRIMARY KEY,
+                request_json TEXT NOT NULL,
+                receipt_json TEXT
+             );
+             CREATE TABLE IF NOT EXISTS manual_validation_recoveries (
+                sequence INTEGER PRIMARY KEY,
+                artifact_digest TEXT NOT NULL,
+                request_digest TEXT NOT NULL,
+                request_json TEXT NOT NULL,
+                receipt_json TEXT,
+                operator_uid INTEGER NOT NULL,
+                operator_gid INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                recovered_at INTEGER NOT NULL,
+                UNIQUE(artifact_digest, request_digest)
+             );
+             CREATE TABLE IF NOT EXISTS qualified_deployments (
+                deployment_id TEXT PRIMARY KEY,
+                receipt_digest TEXT NOT NULL,
+                receipt_json TEXT NOT NULL,
+                eligible INTEGER NOT NULL CHECK (eligible IN (0, 1))
+             );
+             CREATE TABLE IF NOT EXISTS journal_events (
                 sequence INTEGER PRIMARY KEY,
                 event_json TEXT NOT NULL,
                 incident_id TEXT,
