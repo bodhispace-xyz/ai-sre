@@ -52,8 +52,17 @@ each incident. The single application journal owner commits each receipt and its
 audit fact together. Exact replay does not append duplicate facts. Reads check
 current evidence age; polling does not extend the original health window.
 
-The reader first loads the complete bounded scan. It rejects a directory change
-during that scan and never treats a successfully read prefix as a complete scan.
+The reader first loads the complete bounded scan on a blocking worker thread,
+so file reading and JSON parsing do not block the application's async thread.
+It discards a scan if directory metadata changes during the read and retries the
+whole scan, with a maximum of three attempts. A stable invalid scan fails without
+retry. Continuous publication can still exhaust the bound and stop intake;
+there is no unbounded retry loop or acceptance of a partial scan.
+
+The application awaits one scan at a time. It retains sole journal ownership and
+yields to other runtime tasks between receipt commits. Individual SQLite calls
+remain synchronous. Cancelling the application does not cancel a filesystem read
+already running on the blocking thread; the local-storage requirement remains.
 A journal failure can leave earlier receipt transactions committed; the worker
 stops before processing another incident. Restart safely replays those receipts.
 

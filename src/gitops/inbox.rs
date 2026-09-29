@@ -30,6 +30,7 @@ impl Default for InboxLimits {
 }
 
 /// A fixed local inbox selected by deployment configuration, never by a model.
+#[derive(Clone)]
 pub struct ReceiptInbox {
     path: PathBuf,
     limits: InboxLimits,
@@ -58,18 +59,38 @@ impl ReceiptInbox {
         if !cfg!(target_os = "linux") {
             return Err(ReceiptError::Unprotected);
         }
-        let before = protected_directory(&self.path)?;
-        let paths = final_paths(&self.path, self.limits)?;
-        let receipts = paths
-            .iter()
-            .map(|path| ProtectedReceipt::read(path))
-            .collect::<Result<Vec<_>, _>>()?;
-        let after = protected_directory(&self.path)?;
-        if identity(&before) != identity(&after) {
-            return Err(ReceiptError::Unprotected);
-        }
-        Ok(receipts)
+        scan(
+            &self.path,
+            self.limits,
+            protected_directory,
+            ProtectedReceipt::read,
+        )
     }
+}
+
+// Retry only a changed snapshot. Stable malformed or unprotected input fails immediately.
+// Each attempt drops its entire result before retrying; a partial set never reaches the journal.
+fn scan(
+    path: &Path,
+    limits: InboxLimits,
+    directory: impl Fn(&Path) -> Result<fs::Metadata, ReceiptError>,
+    mut read: impl FnMut(&Path) -> Result<ProtectedReceipt, ReceiptError>,
+) -> Result<Vec<ProtectedReceipt>, ReceiptError> {
+    for _ in 0..3 {
+        let before = directory(path)?;
+        let result = final_paths(path, limits).and_then(|paths| {
+            paths
+                .iter()
+                .map(|path| read(path))
+                .collect::<Result<Vec<_>, _>>()
+        });
+        let after = directory(path)?;
+        if identity(&before) != identity(&after) {
+            continue;
+        }
+        return result;
+    }
+    Err(ReceiptError::Unprotected)
 }
 
 fn identity(metadata: &fs::Metadata) -> (u64, u64, i64, i64, i64, i64) {
@@ -156,6 +177,87 @@ mod tests {
         ));
         fs::create_dir(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn stable_invalid_receipt_discards_previously_read_evidence() {
+        // Given a stable inbox with a valid receipt followed by an invalid receipt.
+        let root = directory();
+        fs::write(root.join("a.json"), "{}").unwrap();
+        fs::write(root.join("b.json"), "{}").unwrap();
+        let mut reads = 0;
+        // When the complete scan fails after reading its valid prefix.
+        let result = scan(
+            &root,
+            InboxLimits::default(),
+            |path| fs::symlink_metadata(path).map_err(|_| ReceiptError::Unprotected),
+            |_| {
+                reads += 1;
+                if reads == 1 {
+                    Ok(crate::gitops::receipt::fixture())
+                } else {
+                    Err(ReceiptError::InvalidFields)
+                }
+            },
+        );
+        // Then no partial evidence is returned, and stable invalid input is not retried.
+        assert!(matches!(result, Err(ReceiptError::InvalidFields)));
+        assert_eq!(reads, 2);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn concurrent_publication_retries_the_whole_snapshot_with_a_fixed_limit() {
+        // Given one final file and a producer publishing a second file during the first read.
+        let root = directory();
+        fs::write(root.join("a.json"), "{}").unwrap();
+        let metadata =
+            |path: &Path| fs::symlink_metadata(path).map_err(|_| ReceiptError::Unprotected);
+        let mut reads = 0;
+        let result = scan(&root, InboxLimits::default(), metadata, |_| {
+            reads += 1;
+            if reads == 1 {
+                let publish_root = root.clone();
+                std::thread::spawn(move || {
+                    fs::write(publish_root.join(".receipt-new"), "{}").unwrap();
+                    fs::rename(
+                        publish_root.join(".receipt-new"),
+                        publish_root.join("b.json"),
+                    )
+                    .unwrap();
+                })
+                .join()
+                .unwrap();
+            }
+            Ok(crate::gitops::receipt::fixture())
+        })
+        .unwrap();
+        // Then the first partial set is discarded and both final files appear in the stable retry.
+        assert_eq!(reads, 3);
+        assert_eq!(result.len(), 2);
+        fs::remove_file(root.join("b.json")).unwrap();
+        // When the producer keeps changing the directory, retries stop after three attempts.
+        let mut attempts = 0;
+        assert!(
+            scan(&root, InboxLimits::default(), metadata, |_| {
+                attempts += 1;
+                fs::write(root.join(format!(".receipt-{attempts}")), "{}").unwrap();
+                Ok(crate::gitops::receipt::fixture())
+            })
+            .is_err()
+        );
+        assert_eq!(attempts, 3);
+        // Then stable malformed evidence is not retried as if it were a publication race.
+        let mut failures = 0;
+        assert!(
+            scan(&root, InboxLimits::default(), metadata, |_| {
+                failures += 1;
+                Err(ReceiptError::InvalidFields)
+            })
+            .is_err()
+        );
+        assert_eq!(failures, 1);
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[cfg(target_os = "linux")]

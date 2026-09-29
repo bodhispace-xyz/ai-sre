@@ -88,13 +88,14 @@ impl DeploymentIntake {
         Ok(Some(Self { inbox, tick }))
     }
 
-    fn refresh(&self, journal: &mut JournalStore) -> Result<(), DeploymentIntakeError> {
-        let receipts = self.inbox.read().map_err(|_| DeploymentIntakeError::Scan)?;
+    async fn refresh(&self, journal: &mut JournalStore) -> Result<(), DeploymentIntakeError> {
+        let inbox = self.inbox.clone();
+        let receipts = read_off_thread(move || inbox.read()).await?;
         let now = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| DeploymentIntakeError::Scan)?
             .as_secs();
-        record(journal, &receipts, now)
+        record(journal, &receipts, now).await
     }
 }
 
@@ -107,32 +108,103 @@ pub(crate) async fn next(intake: &mut Option<DeploymentIntake>) {
     }
 }
 
-pub(crate) fn refresh(
+pub(crate) async fn refresh(
     intake: &Option<DeploymentIntake>,
     journal: &mut JournalStore,
 ) -> Result<(), DeploymentIntakeError> {
     if let Some(intake) = intake {
-        intake.refresh(journal)?;
+        intake.refresh(journal).await?;
     }
     Ok(())
 }
 
 // Each receipt and its audit fact commit atomically. The single journal owner must stop on error;
 // no repair may run between these commits or after a partial failed import.
-fn record(
+async fn record(
     journal: &mut JournalStore,
     receipts: &[ProtectedReceipt],
     now: u64,
 ) -> Result<(), DeploymentIntakeError> {
     for receipt in receipts {
         journal.record_deployment(receipt, now)?;
+        // Keep journal ownership here, but let HTTP handling and timers run between commits.
+        tokio::task::yield_now().await;
     }
     Ok(())
+}
+
+// There is at most one scan in flight: refresh awaits this job before accepting another scan.
+// Cancellation does not cancel blocking filesystem I/O; the local-storage contract still applies.
+async fn read_off_thread(
+    read: impl FnOnce() -> Result<Vec<ProtectedReceipt>, crate::gitops::receipt::ReceiptError>
+    + Send
+    + 'static,
+) -> Result<Vec<ProtectedReceipt>, DeploymentIntakeError> {
+    tokio::task::spawn_blocking(read)
+        .await
+        .map_err(|_| DeploymentIntakeError::Scan)?
+        .map_err(|_| DeploymentIntakeError::Scan)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn filesystem_errors_and_worker_panics_reject_the_scan() {
+        // Given a filesystem error or a blocking worker that fails before returning evidence.
+        let failed = read_off_thread(|| Err(crate::gitops::receipt::ReceiptError::Unprotected));
+        let panicked = read_off_thread(|| panic!("simulated scan failure"));
+        // When either failure crosses the blocking-worker boundary.
+        let results = [failed.await, panicked.await];
+        // Then neither failure becomes an empty successful scan that could hide a revocation.
+        for result in results {
+            assert!(matches!(result, Err(DeploymentIntakeError::Scan)));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn blocked_filesystem_read_does_not_block_runtime_timers() {
+        // Given a scan that cannot finish until the runtime responds to its start signal.
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let (release, blocked) = std::sync::mpsc::channel();
+        let scan = tokio::spawn(read_off_thread(move || {
+            started.send(()).unwrap();
+            blocked
+                .recv_timeout(Duration::from_secs(2))
+                .map_err(|_| crate::gitops::receipt::ReceiptError::Unprotected)?;
+            Ok(Vec::new())
+        }));
+        waiting.await.unwrap();
+        // When a timer runs on the same single-thread runtime while filesystem work remains blocked.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        release.send(()).unwrap();
+        // Then the scan completes only after that runtime task releases it, without a deadlock.
+        assert!(scan.await.unwrap().unwrap().is_empty());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn journal_import_yields_to_other_tasks_between_receipts() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        // Given a ready import and another task on the same runtime thread.
+        let mut journal = JournalStore::open(":memory:").unwrap();
+        let receipts = [
+            crate::gitops::receipt::fixture(),
+            crate::gitops::receipt::fixture(),
+        ];
+        let completed = AtomicBool::new(false);
+        // When journal imports run, another ready task must run before the whole batch finishes.
+        let (_, ran_during_import) = tokio::join!(
+            async {
+                record(&mut journal, &receipts, 221).await.unwrap();
+                completed.store(true, Ordering::SeqCst);
+            },
+            async { !completed.load(Ordering::SeqCst) }
+        );
+        // Then the journal remains single-owner and replay still creates only one audit fact.
+        assert!(ran_during_import);
+        assert_eq!(journal.journal().entries().len(), 1);
+    }
 
     #[tokio::test]
     async fn deployment_settings_are_opt_in_and_invalid_limits_never_fall_back() {
@@ -163,12 +235,12 @@ mod tests {
         assert!(DeploymentIntake::configured(Some("relative".into()), None, None, None).is_err());
     }
 
-    #[test]
-    fn complete_scan_revocation_wins_and_replay_never_requalifies_it() {
+    #[tokio::test]
+    async fn complete_scan_revocation_wins_and_replay_never_requalifies_it() {
         // Given an accepted deployment and a later protected revocation of that identity.
         let mut journal = JournalStore::open(":memory:").unwrap();
         let receipt = crate::gitops::receipt::fixture();
-        record(&mut journal, &[receipt], 221).unwrap();
+        record(&mut journal, &[receipt], 221).await.unwrap();
         let mut revoked = crate::gitops::receipt::fixture();
         revoked.wire.revoked = true;
         let id = revoked.deployment_id().to_owned();
@@ -178,25 +250,32 @@ mod tests {
             &[revoked, crate::gitops::receipt::fixture()],
             222,
         )
+        .await
         .unwrap();
         let events = journal.journal().entries().len();
-        record(&mut journal, &[crate::gitops::receipt::fixture()], 223).unwrap();
+        record(&mut journal, &[crate::gitops::receipt::fixture()], 223)
+            .await
+            .unwrap();
         // Then old-file replay cannot undo the revocation or add duplicate audit facts.
         assert!(journal.qualified_deployment(&id, 223).unwrap().is_none());
         assert_eq!(journal.journal().entries().len(), events);
     }
 
-    #[test]
-    fn repeated_scans_preserve_audit_identity_but_recheck_health_age() {
+    #[tokio::test]
+    async fn repeated_scans_preserve_audit_identity_but_recheck_health_age() {
         // Given a complete valid receipt already committed by the application owner.
         let mut journal = JournalStore::open(":memory:").unwrap();
         let receipt = crate::gitops::receipt::fixture();
         let id = receipt.deployment_id().to_owned();
-        record(&mut journal, &[receipt], 221).unwrap();
+        record(&mut journal, &[receipt], 221).await.unwrap();
         // When an identical publication is read again, and later becomes stale.
-        record(&mut journal, &[crate::gitops::receipt::fixture()], 222).unwrap();
+        record(&mut journal, &[crate::gitops::receipt::fixture()], 222)
+            .await
+            .unwrap();
         assert!(journal.qualified_deployment(&id, 222).unwrap().is_some());
-        record(&mut journal, &[crate::gitops::receipt::fixture()], 900).unwrap();
+        record(&mut journal, &[crate::gitops::receipt::fixture()], 900)
+            .await
+            .unwrap();
         // Then polling does not grow the journal or keep expired qualification alive.
         assert_eq!(journal.journal().entries().len(), 1);
         assert!(journal.qualified_deployment(&id, 900).unwrap().is_none());

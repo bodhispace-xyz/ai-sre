@@ -106,7 +106,7 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
     let (worker_failed, worker_failed_rx) = oneshot::channel();
     let mut dispatcher = IncidentDispatcher::new(JournalStore::open(journal_path)?);
     let mut deployment_intake = deployment_intake::DeploymentIntake::from_environment()?;
-    deployment_intake::refresh(&deployment_intake, dispatcher.journal_mut())?;
+    deployment_intake::refresh(&deployment_intake, dispatcher.journal_mut()).await?;
     let admin_listener = manual_repair_admin::AdminListener::from_environment()?;
     for report in dispatcher
         .journal()
@@ -165,7 +165,7 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                 None => {
                     tokio::select! {
                         () = deployment_intake::next(&mut deployment_intake) => {
-                            if let Err(error) = deployment_intake::refresh(&deployment_intake, dispatcher.journal_mut()) {
+                            if let Err(error) = deployment_intake::refresh(&deployment_intake, dispatcher.journal_mut()).await {
                                 eprintln!("{error}");
                                 break 'worker;
                             }
@@ -210,7 +210,7 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                 .await;
             for incident in incidents {
                 if let Err(error) =
-                    deployment_intake::refresh(&deployment_intake, dispatcher.journal_mut())
+                    deployment_intake::refresh(&deployment_intake, dispatcher.journal_mut()).await
                 {
                     eprintln!("{error}");
                     break 'worker;

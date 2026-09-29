@@ -972,6 +972,36 @@ and two opt-in Tempo tests skipped. Formatting, Clippy, doctests, rustdoc, and
 cargo-deny passed. The Linux-root test above ran separately rather than being
 counted as a skipped macOS test. `git diff --check` passed.
 
+## September 29: receipt intake responsiveness and publication races
+
+The operational branch now includes the merged dependency fixes from `develop`
+at `3a85a69`. Receipt scans run on a blocking worker so filesystem reads and JSON
+parsing do not hold the async runtime thread. The application awaits each scan
+and keeps sole journal ownership. It yields between receipt commits; individual
+SQLite calls remain synchronous.
+
+A scan checks directory identity and timestamps before and after reading. If
+publication changes that snapshot, the reader discards the entire result and
+retries, up to three attempts. Stable invalid input fails immediately. Exhausted
+retries stop intake under the existing policy. No successful prefix reaches the
+journal. Final files must remain immutable and use atomic publication.
+
+Regression tests cover runtime responsiveness during a blocked read, yielding
+between commits, filesystem errors, blocking-worker panics, concurrent publication,
+retry exhaustion, and rejection of a valid prefix followed by invalid evidence.
+The blocking read may outlive cancellation; trusted local storage remains required.
+
+This batch does not complete U9. Timely receipt and revocation delivery, upstream
+source freshness, incident-to-validation dispatch, deployed crash acceptance,
+and production enrollment still need acceptance before activation. The earlier
+Linux-root and live-worker results above remain historical evidence.
+
+Validation: `direnv exec . env NEXTEST_TEST_THREADS=2 make ci` passed with
+223 tests and two opt-in Tempo tests skipped. Formatting, strict Clippy, doctests,
+rustdoc, and all cargo-deny gates passed. The sandbox run failed nine socket-based
+tests; all passed when rerun with local socket access. `git diff --check` passed.
+Linux-root acceptance was not rerun for this batch.
+
 ## Research sources
 
 - [serde_yaml_ng 0.10.0 API](https://docs.rs/serde_yaml_ng/latest/): latest release
