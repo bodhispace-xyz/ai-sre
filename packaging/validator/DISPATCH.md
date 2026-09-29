@@ -79,6 +79,9 @@ its local directory is readable.
 
 The application imports the complete checkpoint set, prepares a candidate from
 durable incident evidence, then checks the checkpoint again before dispatch.
+That check runs after the coordinator captures Git source; slow capture cannot
+consume an attempt under expired admission. Time is checked again after the
+durable reservation and before SSH starts.
 The existing coordinator reserves the attempt before SSH. After validation it
 recaptures Git source, reloads the checkpoint, imports new receipts/revocations,
 and checks expiry before transactional handoff. Changed base or deployment

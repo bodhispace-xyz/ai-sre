@@ -143,32 +143,19 @@ impl RepairDispatch {
                 "Manual repair: no eligible image correction; recommendation only.".into(),
             ));
         };
-        // Preparation can read a large tree. Refresh admission immediately before reserving work.
-        let before_dispatch =
-            load_checkpoint(self.checkpoint.clone(), self.inbox.clone(), self.max_age).await?;
-        same_selection(&admission, &before_dispatch)?;
-        for receipt in &before_dispatch.receipts {
-            journal
-                .record_deployment(receipt, now()?)
-                .map_err(|_| SandboxError::Failed)?;
-            tokio::task::yield_now().await;
-        }
-        ensure_current(&before_dispatch, now()?)?;
-        if journal
-            .qualified_deployment(&admission.deployment_id, now()?)
-            .map_err(|_| SandboxError::Failed)?
-            .is_none()
-        {
-            return Err(SandboxError::Failed);
-        }
         let artifact = candidate.artifact_digest();
         let checkpoint = self.checkpoint.clone();
         let inbox = self.inbox.clone();
         let max_age = self.max_age;
-        let recheck = async move {
-            let current = load_checkpoint(checkpoint, inbox, max_age).await?;
-            same_selection(&admission, &current)?;
-            Ok(Some(current))
+        let recheck = || {
+            let checkpoint = checkpoint.clone();
+            let inbox = inbox.clone();
+            let expected = &admission;
+            async move {
+                let current = load_checkpoint(checkpoint, inbox, max_age).await?;
+                same_selection(expected, &current)?;
+                Ok(Some(current))
+            }
         };
         let outcome = validate_with_recheck(
             journal,
@@ -177,7 +164,7 @@ impl RepairDispatch {
                 candidate: &candidate,
                 context,
                 repository: &self.repository,
-                base: &before_dispatch.base,
+                base: &admission.base,
                 policy: &self.policy,
             },
             recheck,

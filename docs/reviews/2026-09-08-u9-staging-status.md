@@ -1068,6 +1068,17 @@ the existing isolation policy. Production admission checks were not weakened.
 No production hook, credential, worker, scheduled transfer, or repair has been
 activated. Full U9 acceptance must not be marked complete until these gates pass.
 
+## September 29: review fixes
+
+The operational review found and fixed expired admission during coordinator
+source capture, overlapping revocation/completion filenames, and incomplete
+transport receipt validation. The failing regressions and resolutions are in the
+[prioritized review record](2026-09-29-u9-operational-review.md).
+Final local CI passed 231 tests with two opt-in Tempo tests skipped. All 21
+producer tests passed as Linux root without skips. The revised guarded dispatcher
+passed real SSH/Podman validation and restart duplicate suppression. Production
+enrollment and live producer acceptance remain open activation gates.
+
 ## Research sources
 
 - [serde_yaml_ng 0.10.0 API](https://docs.rs/serde_yaml_ng/latest/): latest release
