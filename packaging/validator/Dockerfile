@@ -18,8 +18,17 @@ RUN pip install --no-cache-dir ansible-core==2.21.3 PyYAML==6.0.3 \
 FROM tools AS providers
 COPY --from=homelab /infra/opentofu/lxc/providers.tf /provider-input/providers.tf
 COPY --from=homelab /infra/opentofu/lxc/.terraform.lock.hcl /provider-input/.terraform.lock.hcl
+COPY --from=homelab /infra/opentofu/cloudflare/providers.tf /provider-cloudflare/providers.tf
+COPY --from=homelab /infra/opentofu/cloudflare/.terraform.lock.hcl /provider-cloudflare/.terraform.lock.hcl
+COPY --from=homelab /infra/opentofu/tailscale/providers.tf /provider-tailscale/providers.tf
+COPY --from=homelab /infra/opentofu/tailscale/.terraform.lock.hcl /provider-tailscale/.terraform.lock.hcl
+COPY --from=homelab /infra/opentofu/truenas/providers.tf /provider-truenas/providers.tf
+COPY --from=homelab /infra/opentofu/truenas/.terraform.lock.hcl /provider-truenas/.terraform.lock.hcl
 WORKDIR /provider-input
-RUN tofu providers mirror /opt/providers
+RUN tofu providers mirror /opt/providers \
+    && tofu -chdir=/provider-cloudflare providers mirror /opt/providers \
+    && tofu -chdir=/provider-tailscale providers mirror /opt/providers \
+    && tofu -chdir=/provider-truenas providers mirror /opt/providers
 
 FROM tools AS validator
 COPY --from=providers /opt/providers /opt/providers

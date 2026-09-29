@@ -217,6 +217,8 @@ async fn write_frame<W: AsyncWrite + Unpin>(
 }
 
 /// Deployment-owned SSH identity and host enrollment; never populated by model output.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct SshWorkerConfig {
     /// Dedicated worker DNS name or IPv4 address.
     pub host: String,

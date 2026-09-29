@@ -111,6 +111,22 @@ pub async fn validate_manual_repair(
     worker: &mut SshValidator,
     request: ManualValidationRequest<'_>,
 ) -> Result<Option<ManualRepairHandoff>, SandboxError> {
+    validate_with_recheck(journal, worker, request, || async { Ok(None) }).await
+}
+
+// The incident integration supplies fresh checkpoints immediately before dispatch and handoff.
+// The public coordinator above remains available for explicitly staged/offline acceptance.
+pub(crate) async fn validate_with_recheck<F>(
+    journal: &mut JournalStore,
+    worker: &mut SshValidator,
+    request: ManualValidationRequest<'_>,
+    mut recheck: impl FnMut() -> F,
+) -> Result<Option<ManualRepairHandoff>, SandboxError>
+where
+    F: std::future::Future<
+            Output = Result<Option<crate::gitops::admission::Admission>, SandboxError>,
+        >,
+{
     let artifact = request.candidate.artifact_digest();
     if journal
         .manual_validation_attempt(&artifact)
@@ -123,6 +139,20 @@ pub async fn validate_manual_repair(
         RepositorySnapshot::capture(request.repository, request.base, request.candidate.image())
             .await
             .map_err(|_| SandboxError::Failed)?;
+    // Snapshot capture can outlive admission. Refresh only after that potentially slow operation.
+    let dispatch_admission = recheck().await?;
+    if let Some(admission) = dispatch_admission.as_ref() {
+        import_admission(journal, admission, request.base, now()?)?;
+        let at = now()?;
+        ensure_current(admission, at)?;
+        let qualified = journal
+            .qualified_deployment(&admission.deployment_id, at)
+            .map_err(|_| SandboxError::Failed)?
+            .ok_or(SandboxError::Failed)?;
+        if qualified.receipt_digest() != request.candidate.qualification_digest() {
+            return Err(SandboxError::Failed);
+        }
+    }
     let job = RemoteJob::new(request.candidate, &snapshot, request.policy, now()?)?;
     let wire = serde_json::to_string(&job).map_err(|_| SandboxError::Failed)?;
     // Commit before any SSH side effect. The unique candidate key also serializes competing callers.
@@ -132,12 +162,13 @@ pub async fn validate_manual_repair(
     {
         return Err(SandboxError::AttemptExists);
     }
-    let receipt = receive_validation(
-        journal,
-        &artifact,
-        &wire,
-        worker.validate(&job, request.policy),
-    )
+    let receipt = receive_validation(journal, &artifact, &wire, async {
+        // The durable reservation itself may be slow. Expired authority cannot start SSH.
+        if let Some(admission) = dispatch_admission.as_ref() {
+            ensure_current(admission, now()?)?;
+        }
+        worker.validate(&job, request.policy).await
+    })
     .await?;
     // Re-capture HEAD after remote work; stale/moved source cannot become a ready artifact.
     let current =
@@ -147,16 +178,53 @@ pub async fn validate_manual_repair(
     if current.digest() != snapshot.digest() {
         return Err(SandboxError::Failed);
     }
+    let final_admission = recheck().await?;
+    if let Some(admission) = final_admission.as_ref() {
+        import_admission(journal, admission, request.base, now()?)?;
+    }
+    // Check after import and pass that same instant to the journal finalizer.
+    let finalized_at = now()?;
+    if let Some(admission) = final_admission.as_ref() {
+        ensure_current(admission, finalized_at)?;
+    }
     journal
         .finalize_manual_repair(&ManualHandoffRequest {
             candidate: request.candidate,
             validation: &receipt,
             context: request.context,
             current_base: current.base_sha(),
-            now: now()?,
+            now: finalized_at,
             policy: request.policy,
         })
         .map_err(|_| SandboxError::Failed)
+}
+
+fn import_admission(
+    journal: &mut JournalStore,
+    admission: &crate::gitops::admission::Admission,
+    base: &str,
+    at: u64,
+) -> Result<(), SandboxError> {
+    if admission.base != base {
+        return Err(SandboxError::Failed);
+    }
+    ensure_current(admission, at)?;
+    for receipt in &admission.receipts {
+        journal
+            .record_deployment(receipt, at)
+            .map_err(|_| SandboxError::Failed)?;
+    }
+    Ok(())
+}
+
+fn ensure_current(
+    admission: &crate::gitops::admission::Admission,
+    at: u64,
+) -> Result<(), SandboxError> {
+    if at < admission.observed_at || at >= admission.expires_at {
+        return Err(SandboxError::Failed);
+    }
+    Ok(())
 }
 
 fn now() -> Result<u64, SandboxError> {

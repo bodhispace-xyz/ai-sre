@@ -1,7 +1,10 @@
 # U9 staging status
 
-U9 is incomplete. This branch starts shadow-only preparation; it does not expose
-a GitHub writer, accept production credentials, or authorize a deployment.
+U9 production acceptance remains incomplete. The operational branch now connects
+guarded incident dispatch to the tested SSH validator and manual handoff. It does
+not expose a GitHub writer or authorize deployment. See the September 29
+operational acceptance section for the current evidence and activation gates;
+earlier sections describe historical checkpoints.
 
 ## Accepted scope change — manual publishing first
 
@@ -10,8 +13,8 @@ No dedicated GitHub account, App, or Gate C signature is needed for this local
 handoff. AI-SRE must not borrow the operator's personal `gh` credentials. The
 canonical U9 plan records the revised acceptance boundary. U9 remains incomplete:
 the current core has tested containment, substantive offline homelab validation,
-and durable handoff preparation, but not operator-facing delivery or live worker
-integration. The latest isolated image acceptance is recorded below.
+and durable handoff preparation. Operator-facing delivery and worker integration
+now have isolated acceptance; production enrollment remains outstanding.
 
 ## Implemented
 
@@ -896,6 +899,185 @@ cargo-deny passed. No dependencies were added or upgraded.
 
 The deferred operational items above remain deferred. This fix does not claim
 production readiness or full U9 completion.
+
+## September 20: operational completion branch
+
+PR #25 merged into `develop` at `6d5396f`. Follow-up implementation starts on
+`feat/u9-operational-completion`, from that exact base. No new PR or production
+activation is part of this checkpoint.
+
+The worker now checks that its configuration leaf is a regular file and that
+all ancestors are directories before opening it. This closes the deferred FIFO
+startup-blocking gap. A test covers regular files, directories, symlinks, and a
+real FIFO without opening the FIFO. Root ownership and mode checks remain intact.
+Root and the protected configuration publisher remain trusted.
+
+The first CI run passed 213 tests but failed the advisory gate on the existing
+rustls 0.23.43 lock entry. [RUSTSEC-2026-0285](https://rustsec.org/advisories/RUSTSEC-2026-0285)
+was published after the previous batch's verification. The lockfile now selects
+[rustls 0.23.45](https://github.com/rustls/rustls/releases/tag/v/0.23.45) and
+[rustls-webpki 0.103.15](https://github.com/rustls/webpki/releases/tag/v/0.103.15).
+Both upstream latest-release pages were checked before completing this update.
+No advisory exception was added.
+
+The repeat `env NEXTEST_TEST_THREADS=2 make ci` passed: 213 tests, two opt-in
+Tempo tests skipped, and all formatting, lint, documentation, and dependency
+gates passed. No live deployment acceptance was run for this checkpoint.
+
+Receipt delivery and revocation, source-mirror freshness, incident-loop wiring,
+deployed crash acceptance, and production enrollment remain unfinished. The
+homelab producer design still requires acceptance before activation; a merged
+staging PR does not establish those guarantees.
+
+## September 20: protected receipt intake
+
+The application now has an optional protected inbox importer. It reads at startup,
+on a configurable timer, and before each incident through the single journal
+owner. The directory scan has configurable entry and byte bounds. It reads every
+final receipt on each pass; there is no filename cursor that could hide a later
+revocation. Existing receipt and journal rules supply provenance, qualification,
+idempotency, contradiction handling, and durable revocation.
+
+The importer defaults to disabled. It neither invokes the repair coordinator nor
+grants source freshness or artifact readiness. [Inbox operations](../../packaging/validator/INBOX.md)
+defines final file names, temporary-file exclusion, publication, retention, and
+the deliberate fail-stop policy for an enabled inbox. A directory can be empty
+or readable while upstream delivery is incomplete; scan success is not an
+activation gate.
+
+The isolated Fedora VM passed the explicit root test
+`protected_linux_scan_ingests_revocation_and_rejects_unsafe_entries`. It exercised
+the production reader and journal with synthetic files: atomic publication,
+revocation, writable-file rejection, FIFO rejection, malformed JSON, and hard-link
+rejection. Three application-import contract tests also passed as `validator`.
+The test removed its root-owned fixture; the VM was stopped after acceptance.
+The separate source copy remains at `/home/validator/u9-inbox-Q8lFhu` for diagnosis.
+No homelab service, credential, or deployment was changed.
+
+Review focus before wiring repair dispatch:
+
+1. Must remain closed: receipt ingestion does not prove timely upstream delivery,
+   complete revocation delivery, Git freshness, or independent worker enrollment.
+   Do not connect scan success directly to repair dispatch.
+2. Safe to defer while dispatch is disabled: inbox retention/compaction and a
+   complete live producer-to-responder acceptance run. Overflow rejects ingestion;
+   deleting a file does not revoke the journal record.
+3. Deliberate decisions to review: enabled-inbox failure stops shadow investigation
+   too; each receipt commits separately, with worker termination on any commit
+   failure; filesystem reads require trusted local storage, not a network mount.
+
+This is a new trust-boundary review checkpoint, not full U9 completion. Source
+freshness, coordinator dispatch, deployed crash acceptance, and production
+enrollment remain unfinished. No dependency or action version changed here.
+
+Final local validation: `env NEXTEST_TEST_THREADS=2 make ci` passed with 218 tests
+and two opt-in Tempo tests skipped. Formatting, Clippy, doctests, rustdoc, and
+cargo-deny passed. The Linux-root test above ran separately rather than being
+counted as a skipped macOS test. `git diff --check` passed.
+
+## September 29: receipt intake responsiveness and publication races
+
+The operational branch now includes the merged dependency fixes from `develop`
+at `3a85a69`. Receipt scans run on a blocking worker so filesystem reads and JSON
+parsing do not hold the async runtime thread. The application awaits each scan
+and keeps sole journal ownership. It yields between receipt commits; individual
+SQLite calls remain synchronous.
+
+A scan checks directory identity and timestamps before and after reading. If
+publication changes that snapshot, the reader discards the entire result and
+retries, up to three attempts. Stable invalid input fails immediately. Exhausted
+retries stop intake under the existing policy. No successful prefix reaches the
+journal. Final files must remain immutable and use atomic publication.
+
+Regression tests cover runtime responsiveness during a blocked read, yielding
+between commits, filesystem errors, blocking-worker panics, concurrent publication,
+retry exhaustion, and rejection of a valid prefix followed by invalid evidence.
+The blocking read may outlive cancellation; trusted local storage remains required.
+
+This batch does not complete U9. Timely receipt and revocation delivery, upstream
+source freshness, incident-to-validation dispatch, deployed crash acceptance,
+and production enrollment still need acceptance before activation. The earlier
+Linux-root and live-worker results above remain historical evidence.
+
+Validation: `direnv exec . env NEXTEST_TEST_THREADS=2 make ci` passed with
+223 tests and two opt-in Tempo tests skipped. Formatting, strict Clippy, doctests,
+rustdoc, and all cargo-deny gates passed. The sandbox run failed nine socket-based
+tests; all passed when rerun with local socket access. `git diff --check` passed.
+Linux-root acceptance was not rerun for this batch.
+
+## September 29: operational integration and isolated acceptance
+
+The optional protected dispatch configuration now connects the enrolled pilot
+alert to candidate preparation, SSH validation, and durable operator handoff.
+The incident report exposes the candidate digest and outcome. Each incident can
+reserve one automatic attempt across runs and restart. Recovery remains explicit;
+it does not authorize an automatic retry, PR, or deployment.
+
+A root-owned short-lived checkpoint binds source selection to the complete
+receipt set. The responder reloads it before dispatch and after validation,
+imports revocations, and rejects changed selection or expired authority. The
+Python producer and Rust reader share a canonical digest fixture. The companion
+homelab branch implements append-only revocation, checkpoint export, and bounded
+delivery with checkpoint publication last. Old bundles cannot hide a delivered
+revocation. See [dispatch enrollment](../../packaging/validator/DISPATCH.md).
+
+The substantive validator now preloads providers for LXC, Cloudflare, Tailscale,
+and TrueNAS. Offline validation supplies a non-secret TrueNAS placeholder to
+prevent a local secret lookup. No crate, action, or tool version was changed.
+
+Acceptance ran in the disposable, isolated `ai-sre-u9-acceptance` Fedora VM, not
+on a homelab service. It used synthetic deployment evidence, disposable SSH keys,
+loopback SSH, and a clean homelab source archive from `ac28ce7`:
+
+- Local full CI: 230 tests passed, two opt-in Tempo tests skipped; formatting,
+  strict Clippy, documentation, and cargo-deny passed.
+- Linux library suite: 102 passed, seven privileged/opt-in tests excluded from
+  the ordinary run and exercised separately where applicable.
+- Protected inbox, cross-user admin CLI, real rootless containment, and restart
+  cleanup preserving an unrelated container passed.
+- Substantive offline homelab validation passed; the deliberately invalid
+  OpenTofu fixture was rejected.
+- Real SSH validation passed, including wrong-host-key and replay rejection.
+- Guarded dispatch produced one handoff, reopened its journal, and refused a
+  duplicate incident attempt even after checkpoint removal.
+- Real transport failure/restart/recovery acceptance passed after waiting for
+  the actual 181-second attempt deadline. It checked early-recovery rejection,
+  explicit recovery, successful revalidation/handoff, and revocation.
+- All 18 companion producer tests passed as Linux root, including interrupted
+  delivery, replay, and revocation transfer. Homelab local CI passed separately.
+
+The acceptance validator digest was
+`sha256:432d7938e6f1ef81366d052ffc75511bcb9a2c7d773c42813167182612add857`;
+the Podman runtime digest was
+`sha256:bebe8a139713765915728a19ac71f54056bf24a094d1e66c1fc73d08f5e380ec`.
+These identify disposable acceptance artifacts, not production enrollment.
+The VM's default host-mount configuration was disabled only in that VM to satisfy
+the existing isolation policy. Production admission checks were not weakened.
+
+### Remaining activation gates
+
+1. Deep review of the new checkpoint, delivery, and incident-dispatch boundaries.
+2. Enroll an actual unprivileged worker, SSH identity/host key, validator digest,
+   resource policy, and exact pilot image-correction alert.
+3. Connect trusted producer deployment hooks and the authenticated upstream
+   mirror/receipt transfer job. The implemented checkpoint command accepts a
+   trusted caller's observation; it is not itself a Git authentication service.
+4. Verify a real producer-to-responder observation, handoff, and revocation after
+   enrollment. Isolated synthetic tests do not establish live health provenance.
+
+No production hook, credential, worker, scheduled transfer, or repair has been
+activated. Full U9 acceptance must not be marked complete until these gates pass.
+
+## September 29: review fixes
+
+The operational review found and fixed expired admission during coordinator
+source capture, overlapping revocation/completion filenames, and incomplete
+transport receipt validation. The failing regressions and resolutions are in the
+[prioritized review record](2026-09-29-u9-operational-review.md).
+Final local CI passed 231 tests with two opt-in Tempo tests skipped. All 21
+producer tests passed as Linux root without skips. The revised guarded dispatcher
+passed real SSH/Podman validation and restart duplicate suppression. Production
+enrollment and live producer acceptance remain open activation gates.
 
 ## Research sources
 

@@ -61,49 +61,7 @@ impl ProtectedReceipt {
     /// Reads an absolute file path under root-owned directories with no group/other writes.
     /// Root must publish regular files by atomic rename and must not modify opened files in place.
     pub fn read(path: &Path) -> Result<Self, ReceiptError> {
-        // The production protection contract is Linux DAC without writable ACL masks.
-        // Other platforms need their own ACL-aware boundary rather than assuming Unix mode bits suffice.
-        if !cfg!(target_os = "linux") {
-            return Err(ReceiptError::Unprotected);
-        }
-        if !path.is_absolute()
-            || path
-                .components()
-                .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
-        {
-            return Err(ReceiptError::Unprotected);
-        }
-        for ancestor in path.ancestors() {
-            let metadata = fs::symlink_metadata(ancestor).map_err(|_| ReceiptError::Unprotected)?;
-            if metadata.uid() != 0
-                || metadata.mode() & 0o022 != 0
-                || metadata.file_type().is_symlink()
-                || (ancestor != path && !metadata.is_dir())
-            {
-                return Err(ReceiptError::Unprotected);
-            }
-        }
-        let before = fs::symlink_metadata(path).map_err(|_| ReceiptError::Unprotected)?;
-        if !before.is_file() || before.len() > MAX_RECEIPT_BYTES || before.nlink() != 1 {
-            return Err(ReceiptError::Unprotected);
-        }
-        let file = File::open(path).map_err(|_| ReceiptError::Unprotected)?;
-        let opened = file.metadata().map_err(|_| ReceiptError::Unprotected)?;
-        if opened.dev() != before.dev()
-            || opened.ino() != before.ino()
-            || opened.uid() != 0
-            || opened.mode() & 0o022 != 0
-            || !opened.is_file()
-        {
-            return Err(ReceiptError::Unprotected);
-        }
-        let mut bytes = Vec::new();
-        file.take(MAX_RECEIPT_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .map_err(|_| ReceiptError::Unprotected)?;
-        if bytes.len() as u64 > MAX_RECEIPT_BYTES {
-            return Err(ReceiptError::Unprotected);
-        }
+        let bytes = read_protected(path, MAX_RECEIPT_BYTES)?;
         let wire: ReceiptWire =
             serde_json::from_slice(&bytes).map_err(|_| ReceiptError::InvalidFields)?;
         wire.validate_shape()?;
@@ -114,6 +72,54 @@ impl ProtectedReceipt {
     pub fn deployment_id(&self) -> &str {
         &self.wire.deployment_id
     }
+}
+
+// Shared Linux provenance check for deployment-owned receipts and admission configuration.
+pub(crate) fn read_protected(path: &Path, limit: u64) -> Result<Vec<u8>, ReceiptError> {
+    // The production protection contract is Linux DAC without writable ACL masks.
+    // Other platforms need their own ACL-aware boundary rather than assuming Unix mode bits suffice.
+    if !cfg!(target_os = "linux") {
+        return Err(ReceiptError::Unprotected);
+    }
+    if !path.is_absolute()
+        || path
+            .components()
+            .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+    {
+        return Err(ReceiptError::Unprotected);
+    }
+    for ancestor in path.ancestors() {
+        let metadata = fs::symlink_metadata(ancestor).map_err(|_| ReceiptError::Unprotected)?;
+        if metadata.uid() != 0
+            || metadata.mode() & 0o022 != 0
+            || metadata.file_type().is_symlink()
+            || (ancestor != path && !metadata.is_dir())
+        {
+            return Err(ReceiptError::Unprotected);
+        }
+    }
+    let before = fs::symlink_metadata(path).map_err(|_| ReceiptError::Unprotected)?;
+    if !before.is_file() || before.len() > limit || before.nlink() != 1 {
+        return Err(ReceiptError::Unprotected);
+    }
+    let file = File::open(path).map_err(|_| ReceiptError::Unprotected)?;
+    let opened = file.metadata().map_err(|_| ReceiptError::Unprotected)?;
+    if opened.dev() != before.dev()
+        || opened.ino() != before.ino()
+        || opened.uid() != 0
+        || opened.mode() & 0o022 != 0
+        || !opened.is_file()
+    {
+        return Err(ReceiptError::Unprotected);
+    }
+    let mut bytes = Vec::new();
+    file.take(limit + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| ReceiptError::Unprotected)?;
+    if bytes.len() as u64 > limit {
+        return Err(ReceiptError::Unprotected);
+    }
+    Ok(bytes)
 }
 
 impl ReceiptWire {

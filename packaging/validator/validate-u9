@@ -17,4 +17,5 @@ exec env -i PATH=/usr/local/bin:/usr/bin:/bin \
     ANSIBLE_COLLECTIONS_PATH=/opt/ansible/collections \
     ANSIBLE_LOCAL_TEMP="$scratch_directory/ansible/tmp" \
     CHECKPOINT_DISABLE=1 \
+    TRUENAS_HOST=offline-validation \
     make -C "$scratch_directory/repository" ci
