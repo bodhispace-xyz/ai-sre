@@ -82,6 +82,16 @@ impl RepairDispatch {
             || config.alert_name.len() > 128
             || config.alert_name.chars().any(char::is_control)
             || !(1..=3600).contains(&config.policy.max_validation_age_seconds)
+            || !config
+                .policy
+                .runtime_digest
+                .strip_prefix("sha256:")
+                .is_some_and(|digest| {
+                    digest.len() == 64
+                        && digest
+                            .bytes()
+                            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                })
         {
             return Err(SandboxError::InvalidConfiguration);
         }
@@ -235,6 +245,45 @@ mod tests {
         incident::{AlertSignal, normalize},
         journal::ManualValidationStage,
     };
+
+    #[test]
+    fn malformed_runtime_digest_rejects_enrollment_before_any_incident_attempt() {
+        let config = |runtime: &str| -> Config {
+            serde_json::from_value(serde_json::json!({
+                "schema":"ai-sre/manual-repair-config/v1", "repository":"/var/lib/ai-sre/repository",
+                "checkpoint":"/var/lib/ai-sre/checkpoint.json", "inbox":"/var/lib/ai-sre/receipts",
+                "max_checkpoint_age_seconds":30, "max_inbox_entries":256, "max_inbox_bytes":1048576,
+                "alert_name":"ItToolsImageDrift",
+                "worker":{"host":"worker.example", "user":"validator", "port":22,
+                    "identity_file":"/etc/ai-sre/key", "known_hosts":"/etc/ai-sre/known_hosts"},
+                "policy":{"max_validation_age_seconds":300,
+                    "validator_image":format!("ghcr.io/bodhispace-xyz/ai-sre-validator@sha256:{}", "a".repeat(64)),
+                    "runtime_digest":runtime, "sandbox_limits":{}}
+            })).unwrap()
+        };
+        // Given otherwise valid deployment enrollment with a malformed runtime identity.
+        let invalid = [
+            String::new(),
+            "sha256:".into(),
+            format!("sha256:{}", "a".repeat(63)),
+            format!("sha256:{}", "a".repeat(65)),
+            format!("sha256:{}", "A".repeat(64)),
+            format!("sha256:{}", "g".repeat(64)),
+            format!("sha512:{}", "a".repeat(64)),
+        ];
+        // When startup builds the repair dispatcher, before a journal or network request exists.
+        for runtime in invalid {
+            // Then invalid identity fails enrollment rather than consuming an incident's attempt.
+            assert!(
+                matches!(
+                    RepairDispatch::configured(config(&runtime)),
+                    Err(SandboxError::InvalidConfiguration)
+                ),
+                "{runtime}"
+            );
+        }
+        assert!(RepairDispatch::configured(config(&format!("sha256:{}", "a".repeat(64)))).is_ok());
+    }
 
     fn incident(service: &str, name: &str, status: AlertStatus) -> IncidentSignal {
         normalize(AlertSignal {
