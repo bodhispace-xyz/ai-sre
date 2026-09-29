@@ -2,7 +2,7 @@
 
 Receipt ingestion is disabled by default. It does not start validation, prepare a
 repair, approve an action, or publish to GitHub. The application still needs
-separate source-freshness and repair-dispatch integration.
+the separately enrolled [source-freshness and repair-dispatch integration](DISPATCH.md).
 
 ## Deployment settings
 

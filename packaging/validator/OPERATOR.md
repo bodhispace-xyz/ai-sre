@@ -77,7 +77,7 @@ The original request deadline must have passed. The server archives the request,
 
 Use reasons without secrets, raw logs, or credentials. Reasons are limited to 512 bytes and cannot contain control characters.
 
-Recovery only reopens eligibility. A later call through the validation coordinator must create a fresh request and pass the worker's ownership recovery, source, qualification, evidence, policy, and handoff freshness checks. Recovery does not prove remote cleanup. An uncertain worker job can still block new work. The live incident-to-validation trigger remains unimplemented.
+Recovery only reopens eligibility. A later explicit call through the validation coordinator must create a fresh request and pass the worker's ownership recovery, source, qualification, evidence, policy, and handoff freshness checks. Recovery does not prove remote cleanup. An uncertain worker job can still block new work. The optional [incident integration](DISPATCH.md) allows one automatic attempt per incident; recovery does not automatically dispatch a second attempt.
 
 If the client loses its reply, inspect history before retrying. A lost reply does not undo a committed recovery. Late validation responses must match the exact active request before they can update it.
 

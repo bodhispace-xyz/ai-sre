@@ -1,7 +1,10 @@
 # U9 staging status
 
-U9 is incomplete. This branch starts shadow-only preparation; it does not expose
-a GitHub writer, accept production credentials, or authorize a deployment.
+U9 production acceptance remains incomplete. The operational branch now connects
+guarded incident dispatch to the tested SSH validator and manual handoff. It does
+not expose a GitHub writer or authorize deployment. See the September 29
+operational acceptance section for the current evidence and activation gates;
+earlier sections describe historical checkpoints.
 
 ## Accepted scope change — manual publishing first
 
@@ -10,8 +13,8 @@ No dedicated GitHub account, App, or Gate C signature is needed for this local
 handoff. AI-SRE must not borrow the operator's personal `gh` credentials. The
 canonical U9 plan records the revised acceptance boundary. U9 remains incomplete:
 the current core has tested containment, substantive offline homelab validation,
-and durable handoff preparation, but not operator-facing delivery or live worker
-integration. The latest isolated image acceptance is recorded below.
+and durable handoff preparation. Operator-facing delivery and worker integration
+now have isolated acceptance; production enrollment remains outstanding.
 
 ## Implemented
 
@@ -1001,6 +1004,69 @@ Validation: `direnv exec . env NEXTEST_TEST_THREADS=2 make ci` passed with
 rustdoc, and all cargo-deny gates passed. The sandbox run failed nine socket-based
 tests; all passed when rerun with local socket access. `git diff --check` passed.
 Linux-root acceptance was not rerun for this batch.
+
+## September 29: operational integration and isolated acceptance
+
+The optional protected dispatch configuration now connects the enrolled pilot
+alert to candidate preparation, SSH validation, and durable operator handoff.
+The incident report exposes the candidate digest and outcome. Each incident can
+reserve one automatic attempt across runs and restart. Recovery remains explicit;
+it does not authorize an automatic retry, PR, or deployment.
+
+A root-owned short-lived checkpoint binds source selection to the complete
+receipt set. The responder reloads it before dispatch and after validation,
+imports revocations, and rejects changed selection or expired authority. The
+Python producer and Rust reader share a canonical digest fixture. The companion
+homelab branch implements append-only revocation, checkpoint export, and bounded
+delivery with checkpoint publication last. Old bundles cannot hide a delivered
+revocation. See [dispatch enrollment](../../packaging/validator/DISPATCH.md).
+
+The substantive validator now preloads providers for LXC, Cloudflare, Tailscale,
+and TrueNAS. Offline validation supplies a non-secret TrueNAS placeholder to
+prevent a local secret lookup. No crate, action, or tool version was changed.
+
+Acceptance ran in the disposable, isolated `ai-sre-u9-acceptance` Fedora VM, not
+on a homelab service. It used synthetic deployment evidence, disposable SSH keys,
+loopback SSH, and a clean homelab source archive from `ac28ce7`:
+
+- Local full CI: 230 tests passed, two opt-in Tempo tests skipped; formatting,
+  strict Clippy, documentation, and cargo-deny passed.
+- Linux library suite: 102 passed, seven privileged/opt-in tests excluded from
+  the ordinary run and exercised separately where applicable.
+- Protected inbox, cross-user admin CLI, real rootless containment, and restart
+  cleanup preserving an unrelated container passed.
+- Substantive offline homelab validation passed; the deliberately invalid
+  OpenTofu fixture was rejected.
+- Real SSH validation passed, including wrong-host-key and replay rejection.
+- Guarded dispatch produced one handoff, reopened its journal, and refused a
+  duplicate incident attempt even after checkpoint removal.
+- Real transport failure/restart/recovery acceptance passed after waiting for
+  the actual 181-second attempt deadline. It checked early-recovery rejection,
+  explicit recovery, successful revalidation/handoff, and revocation.
+- All 18 companion producer tests passed as Linux root, including interrupted
+  delivery, replay, and revocation transfer. Homelab local CI passed separately.
+
+The acceptance validator digest was
+`sha256:432d7938e6f1ef81366d052ffc75511bcb9a2c7d773c42813167182612add857`;
+the Podman runtime digest was
+`sha256:bebe8a139713765915728a19ac71f54056bf24a094d1e66c1fc73d08f5e380ec`.
+These identify disposable acceptance artifacts, not production enrollment.
+The VM's default host-mount configuration was disabled only in that VM to satisfy
+the existing isolation policy. Production admission checks were not weakened.
+
+### Remaining activation gates
+
+1. Deep review of the new checkpoint, delivery, and incident-dispatch boundaries.
+2. Enroll an actual unprivileged worker, SSH identity/host key, validator digest,
+   resource policy, and exact pilot image-correction alert.
+3. Connect trusted producer deployment hooks and the authenticated upstream
+   mirror/receipt transfer job. The implemented checkpoint command accepts a
+   trusted caller's observation; it is not itself a Git authentication service.
+4. Verify a real producer-to-responder observation, handoff, and revocation after
+   enrollment. Isolated synthetic tests do not establish live health provenance.
+
+No production hook, credential, worker, scheduled transfer, or repair has been
+activated. Full U9 acceptance must not be marked complete until these gates pass.
 
 ## Research sources
 

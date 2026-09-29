@@ -7,6 +7,31 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 
 const WIRE: &str = r#"{"nonce":"original","expires_at":1}"#;
 
+#[test]
+fn final_admission_imports_revocation_before_handoff_qualification_is_checked() {
+    // Given a deployment that was qualified before the remote validator ran.
+    let mut store = JournalStore::open(":memory:").unwrap();
+    let original = crate::gitops::receipt::fixture();
+    let id = original.deployment_id().to_owned();
+    store.record_deployment(&original, 221).unwrap();
+    assert!(store.qualified_deployment(&id, 221).unwrap().is_some());
+    let mut revoked = crate::gitops::receipt::fixture();
+    revoked.wire.revoked = true;
+    let admission = crate::gitops::admission::Admission {
+        base: "a".repeat(40),
+        deployment_id: id.clone(),
+        receipts: vec![original, revoked],
+        observed_at: 222,
+        expires_at: 250,
+    };
+    // When a fresh final checkpoint includes the revocation that arrived during validation.
+    import_final_admission(&mut store, &admission, &"a".repeat(40), 223).unwrap();
+    // Then qualification is durably unavailable to the handoff finalizer, regardless of validation success.
+    assert!(store.qualified_deployment(&id, 223).unwrap().is_none());
+    assert!(import_final_admission(&mut store, &admission, &"b".repeat(40), 223).is_err());
+    assert!(import_final_admission(&mut store, &admission, &"a".repeat(40), 250).is_err());
+}
+
 #[tokio::test]
 async fn cancelling_response_wait_retains_unknown_outcome_without_invented_timing() {
     // Given a reserved request and a transport that never supplies an authenticated result.

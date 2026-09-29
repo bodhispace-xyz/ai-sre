@@ -112,12 +112,13 @@ Qualification and incident evidence are synthetic in this test. "Restart" here
 means reopening the journal, not a hard kill of the running responder. Neither a
 live Alertmanager incident nor a production deployment is exercised.
 
-The coordinator is not yet enabled by the incident loop or an operator endpoint.
-The application can import protected local receipts through the optional
-[deployment inbox](INBOX.md); this does not invoke the coordinator.
-Deployment provisioning, live producer delivery, current-readiness assessment, and remote
-Git freshness remain separate acceptance work. No homelab deployment is changed
-by building these entry points.
+The incident loop can invoke the coordinator through the separately enrolled
+[manual repair dispatch](DISPATCH.md) integration. It requires a fresh protected
+source/delivery checkpoint before dispatch and after validation. The optional
+[deployment inbox](INBOX.md) alone does not invoke the coordinator.
+Production provisioning, trusted upstream observation and transfer enrollment,
+and live producer acceptance remain required. Building these entry points does
+not activate a homelab deployment.
 
 ## Verification
 

@@ -7,6 +7,7 @@
 pub mod deployment_intake;
 pub mod manual_repair;
 pub mod manual_repair_admin;
+mod repair_dispatch;
 
 use std::{
     env,
@@ -49,6 +50,9 @@ use crate::{
 /// Application startup and worker failures after configuration parsing.
 #[derive(Debug, Error)]
 pub enum ApplicationError {
+    /// Optional manual repair enrollment was invalid or unprotected.
+    #[error("manual repair configuration is invalid")]
+    ManualRepairConfiguration,
     /// Protected deployment evidence could not be configured or imported.
     #[error(transparent)]
     DeploymentIntake(#[from] deployment_intake::DeploymentIntakeError),
@@ -106,6 +110,9 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
     let (worker_failed, worker_failed_rx) = oneshot::channel();
     let mut dispatcher = IncidentDispatcher::new(JournalStore::open(journal_path)?);
     let mut deployment_intake = deployment_intake::DeploymentIntake::from_environment()?;
+    let mut repair_dispatch = repair_dispatch::RepairDispatch::from_environment()
+        .await
+        .map_err(|_| ApplicationError::ManualRepairConfiguration)?;
     deployment_intake::refresh(&deployment_intake, dispatcher.journal_mut()).await?;
     let admin_listener = manual_repair_admin::AdminListener::from_environment()?;
     for report in dispatcher
@@ -253,7 +260,7 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                     gemini.is_some() as u64 + deepseek.is_some() as u64,
                 );
                 let paid_provider_count = gemini.is_some() as u64 + deepseek.is_some() as u64;
-                let result = investigate_live(LiveInvestigationInput {
+                let mut result = investigate_live(LiveInvestigationInput {
                     grafana: &application.grafana,
                     read_only: Some(&application.read_only),
                     journal: dispatcher.journal_mut(),
@@ -322,6 +329,20 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                         eprintln!("cost reservation reconciliation failed: {error}");
                         let _ = worker_failed.send(());
                         break 'worker;
+                    }
+                }
+                if let (Some(repair), Ok(report)) = (repair_dispatch.as_mut(), result.as_mut()) {
+                    let scope = crate::reasoning::journal::JournalContext {
+                        incident_id: incident.incident_id.clone(),
+                        run_id: run_id.clone(),
+                    };
+                    let note = match repair.run(dispatcher.journal_mut(), &incident, &scope).await {
+                        Ok(note) => note,
+                        Err(_) => Some("Manual repair unavailable: current protected admission could not be established. Recommendation only.".into()),
+                    };
+                    if let Some(note) = note {
+                        report.report.summary.push_str("\n\n");
+                        report.report.summary.push_str(&note);
                     }
                 }
                 if let Ok(report) = result.as_ref() {

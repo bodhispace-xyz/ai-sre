@@ -111,6 +111,19 @@ pub async fn validate_manual_repair(
     worker: &mut SshValidator,
     request: ManualValidationRequest<'_>,
 ) -> Result<Option<ManualRepairHandoff>, SandboxError> {
+    validate_with_recheck(journal, worker, request, async { Ok(None) }).await
+}
+
+// The incident integration supplies a fresh protected checkpoint after remote validation.
+// The public coordinator above remains available for explicitly staged/offline acceptance.
+pub(crate) async fn validate_with_recheck(
+    journal: &mut JournalStore,
+    worker: &mut SshValidator,
+    request: ManualValidationRequest<'_>,
+    recheck: impl std::future::Future<
+        Output = Result<Option<crate::gitops::admission::Admission>, SandboxError>,
+    >,
+) -> Result<Option<ManualRepairHandoff>, SandboxError> {
     let artifact = request.candidate.artifact_digest();
     if journal
         .manual_validation_attempt(&artifact)
@@ -147,6 +160,14 @@ pub async fn validate_manual_repair(
     if current.digest() != snapshot.digest() {
         return Err(SandboxError::Failed);
     }
+    if let Some(admission) = recheck.await? {
+        import_final_admission(journal, &admission, request.base, now()?)?;
+        // Receipt commits can take time; do not hand off after admission expires during import.
+        let after_import = now()?;
+        if after_import < admission.observed_at || after_import >= admission.expires_at {
+            return Err(SandboxError::Failed);
+        }
+    }
     journal
         .finalize_manual_repair(&ManualHandoffRequest {
             candidate: request.candidate,
@@ -157,6 +178,23 @@ pub async fn validate_manual_repair(
             policy: request.policy,
         })
         .map_err(|_| SandboxError::Failed)
+}
+
+fn import_final_admission(
+    journal: &mut JournalStore,
+    admission: &crate::gitops::admission::Admission,
+    base: &str,
+    at: u64,
+) -> Result<(), SandboxError> {
+    if admission.base != base || at < admission.observed_at || at >= admission.expires_at {
+        return Err(SandboxError::Failed);
+    }
+    for receipt in &admission.receipts {
+        journal
+            .record_deployment(receipt, at)
+            .map_err(|_| SandboxError::Failed)?;
+    }
+    Ok(())
 }
 
 fn now() -> Result<u64, SandboxError> {
