@@ -22,6 +22,22 @@ Podman metadata commands can initialize local container storage.
 - Regression tests reject unsafe directory permissions and symlink aliases.
   The image test requires the exact local digest and does not launch work.
 
+## Cross-repository delivery acceptance
+
+The actual merged homelab Python receiver passed the new Linux-only acceptance
+test against Rust admission. Initial delivery succeeded, revocation remained in
+the complete receipt set, and replay of the earlier bundle failed without
+replacing the checkpoint. Rust rejected the checkpoint at expiry.
+
+Full local CI passed again with 235 tests. The Linux-only test compiled and ran
+explicitly in the disposable VM. Strict Linux Clippy could not run because that
+VM does not have the Clippy component; macOS Clippy passed but excludes this
+Linux-only module. Hosted Linux CI must check it before merge.
+
+The test supplies synthetic receipts directly to the receiver. It does not
+claim live producer health sampling, authenticated transport, or production
+enrollment.
+
 ## Remaining enrollment work
 
 A successful check does not establish deployment health, source freshness,

@@ -160,3 +160,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "admission_delivery_tests.rs"]
+mod delivery_tests;
