@@ -50,6 +50,34 @@ not request data. Configuration and each protocol frame are limited to 16 KiB.
 
 ## Lifecycle and results
 
+Before enabling the SSH key, run the local enrollment check as the dedicated
+unprivileged worker account:
+
+```sh
+AI_SRE_VALIDATOR_CONFIG=/etc/ai-sre/worker.json /usr/local/bin/ai-sre-validator --check-enrollment
+```
+
+The configuration uses the same protected file reader as normal worker startup.
+The check requires Linux and verifies the enrolled image/resource policy,
+runtime digest, worker-owned repository directory, private state-directory
+permissions, protected Podman binary, rootless cgroup-v2 controls and seccomp,
+and the exact image digest already present in local storage. It does not pull an
+image, run a workload, claim a request, open the job store, or reconcile pending
+jobs. Podman may perform its normal local storage initialization during metadata
+inspection. Run under the worker's normal `HOME` and `XDG_RUNTIME_DIR`.
+
+Successful JSON reports `local_prerequisites: passed`. It explicitly leaves
+qualification, upstream freshness, and pending-job state unassessed. This is
+not proof that Git contains the requested commit, the source/transfer job is
+current, SSH host-key enrollment is correct, or homelab health has qualified.
+The existing end-to-end validation and delivery gates still apply. Preflight
+does not check request-ledger capacity or authorize clearing it.
+
+The flag is local-only. A process with `SSH_ORIGINAL_COMMAND` set cannot select
+it. Forced-command requests remain restricted to `ai-sre-validator-v1` with no
+process arguments. Unknown flags or SSH commands fail before configuration or
+request processing.
+
 Each invocation handles one length-framed request. Request admission has a
 10-second input deadline. Work expires after the enrolled container deadline plus
 60 seconds; cleanup must succeed before any successful response. Request IDs are

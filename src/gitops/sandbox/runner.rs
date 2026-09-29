@@ -328,6 +328,28 @@ impl RootlessValidator {
         Ok(())
     }
 
+    /// Checks that an enrolled digest already exists locally without pulling or running an image.
+    /// This is a runtime preflight, not sandbox validation or a deployment qualification.
+    pub async fn check_preloaded_image(&mut self, image: &str) -> Result<(), SandboxError> {
+        super::SandboxPlan::new(image, super::SandboxLimits::default())?;
+        self.verify_binary()?;
+        let output = self
+            .control(&[
+                "image",
+                "inspect",
+                "--format",
+                "{{json .RepoDigests}}",
+                image,
+            ])
+            .await?;
+        let digests: Vec<String> =
+            serde_json::from_slice(&output.stdout).map_err(|_| SandboxError::Unavailable)?;
+        if !output.success || !digests.iter().any(|digest| digest == image) {
+            return Err(SandboxError::Unavailable);
+        }
+        Ok(())
+    }
+
     /// Runs the prepared workload and imports only bounded output identities.
     /// A cancelled future keeps its job in this owner; the next call cleans it first.
     pub async fn validate(
@@ -1717,6 +1739,50 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[tokio::test]
+    async fn image_preflight_checks_exact_local_identity_without_launching_work() {
+        use std::os::unix::fs::PermissionsExt;
+        // Given a controlled local engine reporting one digest-pinned preloaded image.
+        let mut fixture = Fixture::new("exit 0").await;
+        let image = fixture.handoff_policy.validator_image.clone();
+        let script = format!(
+            "#!/bin/sh\ncase \"$2\" in\nimage) printf '%s' '[\"{image}\"]';;\n*) exit 2;;\nesac\n"
+        );
+        fs::write(&fixture.validator.binary, &script).unwrap();
+        fs::set_permissions(&fixture.validator.binary, fs::Permissions::from_mode(0o700)).unwrap();
+        fixture.validator.binary_digest = digest(script.as_bytes());
+        // When preflight inspects an exact identity or another otherwise valid digest.
+        assert!(
+            fixture
+                .validator
+                .check_preloaded_image(&image)
+                .await
+                .is_ok()
+        );
+        let other = format!(
+            "ghcr.io/bodhispace-xyz/ai-sre-validator@sha256:{}",
+            "c".repeat(64)
+        );
+        assert!(
+            fixture
+                .validator
+                .check_preloaded_image(&other)
+                .await
+                .is_err()
+        );
+        assert!(
+            fixture
+                .validator
+                .check_preloaded_image("validator:latest")
+                .await
+                .is_err()
+        );
+        // Then only metadata was requested: no workload, job ownership, or attempt exists.
+        assert!(fixture.validator.active.is_none());
+        assert!(fixture.validator.jobs.is_none());
+        assert!(!fixture.root.join("started").exists());
     }
 
     #[tokio::test]
