@@ -121,7 +121,6 @@ pub async fn serve_until(
     let worker_traces = traces.clone();
     let pages = IncidentPages::default();
     let worker_pages = pages.clone();
-    let (worker_failed, worker_failed_rx) = oneshot::channel();
     let (ready, ready_rx) = oneshot::channel();
     let intake_token = env::var("AI_SRE_ALERTMANAGER_TOKEN")
         .map_err(|_| ApplicationError::MissingIntakeCredential)?;
@@ -198,7 +197,7 @@ pub async fn serve_until(
                         () = deployment_intake::next(&mut deployment_intake) => {
                             if let Err(error) = deployment_intake::refresh(&deployment_intake, dispatcher.journal_mut()).await {
                                 eprintln!("{error}");
-                                break 'worker;
+                                return Err(error.into());
                             }
                             worker_metrics.replace_from(dispatcher.journal().journal()).await;
                             continue 'worker;
@@ -206,7 +205,7 @@ pub async fn serve_until(
                         command = manual_repair_admin::next(&mut admin) => {
                             match command {
                                 Some(command) => command.execute(dispatcher.journal_mut()),
-                                None => { eprintln!("local operator service failed"); break 'worker; }
+                                None => { eprintln!("local operator service failed"); return Err(ApplicationError::WorkerFailed); }
                             }
                             continue 'worker;
                         }
@@ -234,8 +233,7 @@ pub async fn serve_until(
                 Err(error) => {
                     let _ = command.acknowledged.send(Err(()));
                     eprintln!("incident dispatch stopped: {error}");
-                    let _ = worker_failed.send(());
-                    break;
+                    return Err(ApplicationError::WorkerFailed);
                 }
             };
             if *stopping.borrow() { break; }
@@ -247,7 +245,7 @@ pub async fn serve_until(
                     deployment_intake::refresh(&deployment_intake, dispatcher.journal_mut()).await
                 {
                     eprintln!("{error}");
-                    break 'worker;
+                    return Err(error.into());
                 }
                 if !matches!(incident.status, AlertStatus::Firing) {
                     continue;
@@ -354,8 +352,7 @@ pub async fn serve_until(
                         .reconcile_cost(&run_id, actual_cost)
                     {
                         eprintln!("cost reservation reconciliation failed: {error}");
-                        let _ = worker_failed.send(());
-                        break 'worker;
+                        return Err(ApplicationError::WorkerFailed);
                     }
                 }
                 if let (Some(repair), Ok(report)) = (repair_dispatch.as_mut(), result.as_mut()) {
@@ -390,8 +387,7 @@ pub async fn serve_until(
                         },
                     ) {
                         eprintln!("incident completion journal failed: {error}");
-                        let _ = worker_failed.send(());
-                        break 'worker;
+                        return Err(ApplicationError::WorkerFailed);
                     }
                     worker_pages.put(report.clone()).await;
                 }
@@ -440,15 +436,11 @@ pub async fn serve_until(
         },
         () = &mut heartbeat => Err(ApplicationError::WorkerFailed),
         result = &mut intake => {
-            worker.shutdown().await.map_err(owner_shutdown_error)?;
+            shutdown_owner(&mut worker).await?;
             result.map_err(ApplicationError::from)
         },
         result = worker.wait() => {
             eprintln!("incident worker exited unexpectedly: {result:?}");
-            Err(ApplicationError::WorkerFailed)
-        },
-        _ = worker_failed_rx => {
-            worker.shutdown().await.map_err(owner_shutdown_error)?;
             Err(ApplicationError::WorkerFailed)
         }
     }
@@ -650,6 +642,57 @@ pub fn listener_address() -> Result<SocketAddr, ApplicationError> {
 #[cfg(test)]
 mod tests {
     use super::valid_price_catalog;
+
+    #[tokio::test]
+    async fn shutdown_preserves_a_failure_from_already_running_owner_work() {
+        // Given owner work inside a synchronous operation before it reports a failure.
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let mut worker = super::owner_thread::OwnerThread::spawn(move |stopping| async move {
+            entered.send(()).unwrap();
+            held.recv_timeout(std::time::Duration::from_secs(3))
+                .unwrap();
+            assert!(*stopping.borrow(), "shutdown must have been requested");
+            Err(super::ApplicationError::WorkerFailed)
+        })
+        .unwrap();
+        started.await.unwrap();
+        // When shutdown overlaps that operation, then the owner fails after it is released.
+        let completion = super::shutdown_owner(&mut worker);
+        tokio::pin!(completion);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(20), &mut completion)
+                .await
+                .is_err()
+        );
+        release.send(()).unwrap();
+        // Then a known owner failure cannot become a successful process shutdown.
+        assert!(matches!(
+            completion.await,
+            Err(super::ApplicationError::WorkerFailed)
+        ));
+    }
+
+    #[tokio::test]
+    async fn shutdown_cancels_startup_and_confirms_owned_state_was_dropped() {
+        // Given startup that owns state but has not announced readiness.
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (released, dropped) = tokio::sync::oneshot::channel::<()>();
+        let mut worker = super::owner_thread::OwnerThread::spawn(move |_| async move {
+            let state = released;
+            entered.send(()).unwrap();
+            std::future::pending::<()>().await;
+            drop(state);
+            Ok(())
+        })
+        .unwrap();
+        started.await.unwrap();
+        // When shutdown is requested before startup finishes.
+        let result = super::shutdown_owner(&mut worker).await;
+        // Then completion confirms state release without waiting for readiness.
+        assert!(result.is_ok());
+        assert!(dropped.await.is_err());
+    }
 
     #[test]
     fn owner_shutdown_distinguishes_timeout_from_confirmed_failure() {
