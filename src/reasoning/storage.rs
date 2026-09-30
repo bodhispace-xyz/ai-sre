@@ -66,6 +66,7 @@ pub struct StoredReport {
 
 /// SQLite journal store with deterministic replay and a transactional outbox.
 pub struct JournalStore {
+    runtime_metrics: crate::observability::runtime::RuntimeMetrics,
     path: PathBuf,
     connection: Connection,
     journal: IncidentJournal,
@@ -82,6 +83,10 @@ impl fmt::Debug for JournalStore {
 }
 
 impl JournalStore {
+    /// Attaches process-local diagnostics without changing journal transactions or replay.
+    pub fn set_runtime_metrics(&mut self, metrics: crate::observability::runtime::RuntimeMetrics) {
+        self.runtime_metrics = metrics;
+    }
     /// Opens or creates the SQLite database and validates its replay stream.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, JournalStoreError> {
         let path = path.as_ref().to_owned();
@@ -208,6 +213,7 @@ impl JournalStore {
 
         drop(statement);
         Ok(Self {
+            runtime_metrics: crate::observability::runtime::RuntimeMetrics::default(),
             path,
             connection,
             journal,
