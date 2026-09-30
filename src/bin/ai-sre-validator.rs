@@ -5,7 +5,9 @@
 
 use ai_sre::gitops::sandbox::{RootlessValidator, SandboxPlan, WorkerConfig, serve_worker};
 use std::{
-    env, fs,
+    env,
+    ffi::OsStr,
+    fs,
     io::{Read, Write},
     os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
@@ -16,7 +18,7 @@ use std::{
 async fn main() -> Result<(), &'static str> {
     let check_enrollment = command_mode(
         &env::args().skip(1).collect::<Vec<_>>(),
-        env::var("SSH_ORIGINAL_COMMAND").ok().as_deref(),
+        env::var_os("SSH_ORIGINAL_COMMAND").as_deref(),
     )?;
     let path = PathBuf::from(
         env::var_os("AI_SRE_VALIDATOR_CONFIG").ok_or("missing worker configuration")?,
@@ -38,11 +40,11 @@ async fn main() -> Result<(), &'static str> {
 }
 
 // A preflight is local-only. The SSH forced-command protocol remains one fixed request operation.
-fn command_mode(args: &[String], original_command: Option<&str>) -> Result<bool, &'static str> {
+fn command_mode(args: &[String], original_command: Option<&OsStr>) -> Result<bool, &'static str> {
     if args == ["--check-enrollment"] && original_command.is_none() {
         return Ok(true);
     }
-    if !args.is_empty() || original_command != Some("ai-sre-validator-v1") {
+    if !args.is_empty() || original_command != Some(OsStr::new("ai-sre-validator-v1")) {
         return Err("unsupported worker command");
     }
     Ok(false)
@@ -191,7 +193,7 @@ fn configuration_component_type(kind: fs::FileType, leaf: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{check_worker_directory, command_mode, configuration_component_type};
-    use std::{fs, os::unix::fs::symlink, process::Command};
+    use std::{ffi::OsStr, fs, os::unix::fs::symlink, process::Command};
 
     #[test]
     fn enrollment_check_cannot_be_selected_through_the_ssh_protocol() {
@@ -199,14 +201,33 @@ mod tests {
         let check = vec!["--check-enrollment".to_owned()];
         // When command admission receives the SSH origin independently of process arguments.
         assert_eq!(command_mode(&check, None), Ok(true));
-        assert_eq!(command_mode(&[], Some("ai-sre-validator-v1")), Ok(false));
+        assert_eq!(
+            command_mode(&[], Some(OsStr::new("ai-sre-validator-v1"))),
+            Ok(false)
+        );
         // Then SSH cannot invoke local diagnostics or fall through from an unknown command.
-        for original in [Some("ai-sre-validator-v1"), Some("anything")] {
+        for original in [
+            Some(OsStr::new("ai-sre-validator-v1")),
+            Some(OsStr::new("anything")),
+        ] {
             assert!(command_mode(&check, original).is_err());
         }
         assert!(command_mode(&[], None).is_err());
-        assert!(command_mode(&[], Some("anything")).is_err());
+        assert!(command_mode(&[], Some(OsStr::new("anything"))).is_err());
         assert!(command_mode(&["--unknown".into()], None).is_err());
+    }
+
+    #[test]
+    fn non_utf8_ssh_origin_cannot_admit_local_preflight() {
+        use std::os::unix::ffi::OsStrExt;
+        // Given an SSH origin marker containing bytes that are not valid UTF-8.
+        let origin = OsStr::from_bytes(b"\xff");
+        // When either local preflight or the fixed worker protocol is requested.
+        let preflight = command_mode(&["--check-enrollment".into()], Some(origin));
+        let worker = command_mode(&[], Some(origin));
+        // Then neither request is admitted; a present marker is never treated as absent.
+        assert_eq!(preflight, Err("unsupported worker command"));
+        assert_eq!(worker, Err("unsupported worker command"));
     }
 
     #[test]
