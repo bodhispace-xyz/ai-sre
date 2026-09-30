@@ -53,7 +53,21 @@ the same process. There is no automatic in-process replacement or takeover.
 Dropping the service future also requests shutdown but cannot await confirmation
 from `Drop`. Abrupt process termination still relies on SQLite durability and
 the existing durable reservation/recovery protocol, not this shutdown handshake.
-This change does not add OS signal handling or prove graceful SIGTERM behavior.
+The service registers SIGTERM and SIGINT handlers before owner startup.
+Either signal stops HTTP intake and requests the same owner shutdown handshake,
+including during startup. Exit is successful only after confirmed owner release;
+an owner error or timeout remains a process failure. Further signals do not bypass
+the handshake. This is cancellation, not a drain of queued investigations.
+An in-flight HTTP connection can close without returning its acknowledgement,
+even if its journal commit finishes. Alert retries use the existing durable
+deduplication protocol.
+
+Allow more than ten seconds of termination grace in the container or service
+supervisor. SIGKILL cannot run this handshake. The deadline confirms journal
+release, not completion or cancellation of remote operations.
+Tokio signal handlers remain installed for the process lifetime and notifications
+can coalesce; the shutdown protocol does not count signals. See the
+[Tokio signal contract](https://docs.rs/tokio/1.53.1/tokio/signal/unix/fn.signal.html).
 
 Runtime shutdown waits 100 ms for auxiliary blocking jobs. A filesystem scan
 already running can outlive that wait; it does not own the journal. No claim is

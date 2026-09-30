@@ -20,6 +20,8 @@ enum MainError {
     Application(#[from] application::ApplicationError),
     #[error("listener could not bind")]
     Bind(#[from] std::io::Error),
+    #[error("termination signal handlers could not register")]
+    Signals(#[source] std::io::Error),
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -33,6 +35,17 @@ async fn main() -> Result<(), MainError> {
         }
     };
     let listener = TcpListener::bind(application::listener_address()?).await?;
-    application::serve(config, listener).await?;
+    // Register both handlers before starting the owner, including its startup recovery.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .map_err(MainError::Signals)?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .map_err(MainError::Signals)?;
+    application::serve_until(config, listener, async move {
+        tokio::select! {
+            _ = terminate.recv() => {},
+            _ = interrupt.recv() => {},
+        }
+    })
+    .await?;
     Ok(())
 }

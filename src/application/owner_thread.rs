@@ -33,12 +33,17 @@ impl<T: Send + 'static> OwnerThread<T> {
                     }
                 };
                 let result = runtime.block_on(async move {
+                    // A stop queued before startup must not initialize owner dependencies.
+                    if *stopping.borrow() {
+                        return None;
+                    }
                     let work = factory(stopping.clone());
                     tokio::pin!(work);
                     tokio::select! {
                         biased;
-                        _ = stopping.changed() => None,
+                        // Preserve a ready result, including failure, before cancellation.
                         output = &mut work => Some(output),
+                        _ = stopping.changed() => None,
                     }
                 });
                 // Blocking filesystem scans may outlive runtime shutdown; none owns the journal.
@@ -88,6 +93,29 @@ mod tests {
         reasoning::{journal::JournalEvent, storage::JournalStore},
         transport::{AlertIntake, IntakeCommand, IntakeConfig},
     };
+
+    #[tokio::test]
+    async fn ready_owner_failure_takes_priority_over_pending_shutdown() {
+        // Given owner setup held just before it supplies an immediately ready failure future.
+        let (entered, started) = oneshot::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let mut owner = OwnerThread::spawn(move |_| {
+            entered.send(()).unwrap();
+            held.recv_timeout(Duration::from_secs(3)).unwrap();
+            std::future::ready(Err::<(), _>("synthetic owner failure"))
+        })
+        .unwrap();
+        started.await.unwrap();
+        // When stop is queued before select polls either branch, both branches are ready.
+        owner.stop.send(true).unwrap();
+        release.send(()).unwrap();
+        let result = tokio::time::timeout(Duration::from_secs(3), owner.wait())
+            .await
+            .unwrap()
+            .unwrap();
+        // Then cancellation cannot erase the ready failure into a successful None result.
+        assert_eq!(result, Some(Err("synthetic owner failure")));
+    }
 
     fn event() -> JournalEvent {
         JournalEvent::IncidentOpened {

@@ -1,4 +1,4 @@
-//! Exercises the actual service binary's HTTP executor while its journal waits on SQLite.
+//! Checks HTTP responsiveness and signal-driven shutdown while the service journal waits on SQLite.
 
 use ai_sre::reasoning::{journal::JournalEvent, storage::JournalStore};
 use std::{
@@ -15,9 +15,21 @@ impl Drop for Service {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn service_answers_metrics_while_durable_webhook_admission_waits_for_sqlite() {
+async fn service_answers_metrics_and_waits_for_durable_commit_before_signal_shutdown() {
+    exercise_contention(true).await;
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn service_acknowledges_only_after_durable_commit_without_shutdown() {
+    exercise_contention(false).await;
+}
+
+async fn exercise_contention(shutdown: bool) {
     // Given the real service with synthetic credentials, local-only dependencies, and fresh state.
-    let root = std::env::temp_dir().join(format!("ai-sre-owner-service-{}", std::process::id()));
+    let root = std::env::temp_dir().join(format!(
+        "ai-sre-owner-service-{}-{shutdown}",
+        std::process::id()
+    ));
     std::fs::create_dir(&root).unwrap();
     let path = root.join("journal.sqlite");
     let config = ai_sre::config::AppConfig {
@@ -92,7 +104,7 @@ async fn service_answers_metrics_while_durable_webhook_admission_waits_for_sqlit
                 "status":"firing", "fingerprint":"owner-contention",
                 "labels":{"alertname":"Synthetic","service":"synthetic"}, "annotations":{},
                 "startsAt":"2026-09-30T10:00:00Z", "endsAt":"0001-01-01T00:00:00Z", "generatorURL":""
-            }]})).send().await.unwrap()
+            }]})).send().await
     });
     // When real webhook admission is blocked on another SQLite writer.
     // Await the owner's pre-dispatch counter, not an assumed scheduling delay. An inline
@@ -134,11 +146,44 @@ async fn service_answers_metrics_while_durable_webhook_admission_waits_for_sqlit
         !webhook.is_finished(),
         "HTTP progress must not fabricate webhook durability"
     );
-    // Then releasing SQLite allows the durable acknowledgement, and restart sees its event.
+    // When repeated termination signals arrive during the synchronous journal commit.
+    if shutdown {
+        let pid = rustix::process::Pid::from_raw(service.0.id() as i32).unwrap();
+        rustix::process::kill_process(pid, rustix::process::Signal::TERM).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            service.0.try_wait().unwrap().is_none(),
+            "shutdown must await owner release"
+        );
+        rustix::process::kill_process(pid, rustix::process::Signal::INT).unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert!(
+            service.0.try_wait().unwrap().is_none(),
+            "another signal must not bypass the owner handshake"
+        );
+    }
+    // Then releasing SQLite permits a successful exit and restart sees the committed event.
     lock.execute_batch("COMMIT").unwrap();
-    assert_eq!(
-        webhook.await.unwrap().status(),
-        reqwest::StatusCode::ACCEPTED
+    // Intake shutdown may close the connection; no client acknowledgement is promised here.
+    let response = webhook.await.unwrap();
+    if !shutdown {
+        assert_eq!(response.unwrap().status(), reqwest::StatusCode::ACCEPTED);
+        let pid = rustix::process::Pid::from_raw(service.0.id() as i32).unwrap();
+        rustix::process::kill_process(pid, rustix::process::Signal::INT).unwrap();
+    }
+    let status = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Some(status) = service.0.try_wait().unwrap() {
+                break status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        status.success(),
+        "confirmed graceful shutdown must exit successfully"
     );
     drop(service);
     drop(lock);
