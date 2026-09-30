@@ -44,7 +44,8 @@ Queued commands that were not processed lose their acknowledgement channel
 when the receiver drops; they do not receive fabricated success.
 
 The supervisor waits up to ten seconds for owner completion. Completion follows
-dropping the owner future and journal. A panic or missing completion is failure.
+dropping the owner future and journal. A panic or missing completion is
+`WorkerFailed`, regardless of which supervision branch observes it.
 If the wait expires, `OwnerShutdownUnconfirmed` is returned. The owner may still
 be running: restart the process through the service supervisor, not an owner in
 the same process. There is no automatic in-process replacement or takeover.
@@ -77,6 +78,10 @@ The actual service-binary test uses cleared environment variables, synthetic
 credentials, fresh SQLite state, and loopback-only dependencies. It holds a
 writer transaction, submits a webhook, confirms `/metrics` still answers while
 the webhook waits, releases the writer, then checks HTTP 202 and durable replay.
+It waits for `ai_sre_runtime_dispatch_started_total` to show owner-side dispatch
+admission, rather than assuming a fixed sleep allowed the owner to run. The
+counter increases before synchronous dispatch and counts attempts, not commits.
+With an inline owner, HTTP cannot expose that observation while SQLite is blocked.
 
 Existing journal, budget, qualification, revocation, and manual-repair tests
 remain regression gates. Production workload benchmarks, worker-local latency,

@@ -28,6 +28,11 @@ under concurrent updates, not a transactional snapshot.
 and after webhook enqueue. Reserved permits count as occupied capacity. It is
 not current depth and can miss short-lived peaks between observations.
 
+Owner isolation also adds `ai_sre_runtime_dispatch_started_total`. It increases
+when the owner dequeues a live webhook batch and begins durable dispatch. It
+includes failed attempts, excludes startup replay, and is not a commit or
+incident-success counter.
+
 All values reset on process restart. They have no incident labels and do not
 write journal facts. Duration measurements use monotonic time. The exporter
 renders the journal snapshot before acquiring its write lock.

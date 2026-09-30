@@ -95,7 +95,30 @@ async fn service_answers_metrics_while_durable_webhook_admission_waits_for_sqlit
             }]})).send().await.unwrap()
     });
     // When real webhook admission is blocked on another SQLite writer.
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // Await the owner's pre-dispatch counter, not an assumed scheduling delay. An inline
+    // owner cannot serve this observation while it is stuck behind the held writer lock.
+    tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            let response = client
+                .get(format!("{url}/metrics"))
+                .bearer_auth("synthetic-service-token")
+                .send()
+                .await
+                .unwrap();
+            assert_eq!(response.status(), reqwest::StatusCode::OK);
+            if response
+                .text()
+                .await
+                .unwrap()
+                .contains("ai_sre_runtime_dispatch_started_total 1\n")
+            {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
     assert!(
         !webhook.is_finished(),
         "no acknowledgement before durable commit"

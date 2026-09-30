@@ -213,6 +213,7 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
             let incidents = match if startup {
                 Ok(command.batch.incidents)
             } else {
+                worker_metrics.runtime().dispatch_started();
                 dispatcher.process_new(command.batch)
             } {
                 Ok(incidents) => {
@@ -417,7 +418,7 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
     tokio::select! {
         () = &mut heartbeat => Err(ApplicationError::WorkerFailed),
         result = &mut intake => {
-            worker.shutdown().await.map_err(|_| ApplicationError::OwnerShutdownUnconfirmed)?;
+            worker.shutdown().await.map_err(owner_shutdown_error)?;
             result.map_err(ApplicationError::from)
         },
         result = worker.wait() => {
@@ -425,9 +426,17 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
             Err(ApplicationError::WorkerFailed)
         },
         _ = worker_failed_rx => {
-            worker.shutdown().await.map_err(|_| ApplicationError::OwnerShutdownUnconfirmed)?;
+            worker.shutdown().await.map_err(owner_shutdown_error)?;
             Err(ApplicationError::WorkerFailed)
         }
+    }
+}
+
+fn owner_shutdown_error(error: std::io::Error) -> ApplicationError {
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        ApplicationError::OwnerShutdownUnconfirmed
+    } else {
+        ApplicationError::WorkerFailed
     }
 }
 
@@ -610,6 +619,22 @@ pub fn listener_address() -> Result<SocketAddr, ApplicationError> {
 #[cfg(test)]
 mod tests {
     use super::valid_price_catalog;
+
+    #[test]
+    fn owner_shutdown_distinguishes_timeout_from_confirmed_failure() {
+        // Given a deadline expiry or a completion-channel failure from a panicked owner.
+        let timeout = std::io::Error::new(std::io::ErrorKind::TimedOut, "synthetic timeout");
+        let panic = std::io::Error::other("synthetic owner failure");
+        // When either shutdown-supervision branch classifies that same error.
+        let unknown = super::owner_shutdown_error(timeout);
+        let confirmed = super::owner_shutdown_error(panic);
+        // Then only expiry reports an unconfirmed owner, independent of the winning branch.
+        assert!(matches!(
+            unknown,
+            super::ApplicationError::OwnerShutdownUnconfirmed
+        ));
+        assert!(matches!(confirmed, super::ApplicationError::WorkerFailed));
+    }
 
     #[test]
     fn price_catalog_requires_provider_identity_price_and_freshness() {
