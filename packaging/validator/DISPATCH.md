@@ -100,6 +100,25 @@ A failed admission leaves a recommendation; it does not mark a candidate ready.
 Delivery is not publication, approval, deployment, or proof of incident recovery.
 Historical inspection still reports `readiness: not_assessed`.
 
+## Isolated delivery acceptance
+
+The ignored Linux test
+`gitops::admission::delivery_tests::python_delivery_preserves_revocation_for_rust_admission`
+runs the actual homelab Python `deliver` command against the Rust checkpoint
+reader. Run it only as root in a disposable VM. Set `U9_RECEIPT_PRODUCER` to an
+absolute path to the reviewed producer script, with its two modules in the
+adjacent `lib` directory.
+
+```sh
+U9_RECEIPT_PRODUCER=/opt/homelab/scripts/ai-sre-receipt-producer cargo test --lib gitops::admission::delivery_tests::python_delivery_preserves_revocation_for_rust_admission -- --ignored --exact
+```
+
+The test uses synthetic receipts under a process-specific `/root` directory.
+It checks initial delivery, revocation delivery, rejected old-bundle replay,
+checkpoint preservation, and expiry. It removes the directory after success.
+This is local receiver/reader acceptance, not proof of authenticated transport,
+upstream observation, health collection, or live deployment hooks.
+
 ## Activation boundary
 
 Local and synthetic Linux acceptance do not enroll production. Before enabling
