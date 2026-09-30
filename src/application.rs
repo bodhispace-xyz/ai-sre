@@ -7,6 +7,7 @@
 pub mod deployment_intake;
 pub mod manual_repair;
 pub mod manual_repair_admin;
+mod owner_thread;
 mod repair_dispatch;
 
 use std::{
@@ -83,6 +84,9 @@ pub enum ApplicationError {
     /// The incident worker stopped after a durable processing failure.
     #[error("incident worker stopped after a durable processing failure")]
     WorkerFailed,
+    /// Shutdown could not confirm that the owner released its journal; restart the process, not the owner in place.
+    #[error("incident owner shutdown is unconfirmed")]
+    OwnerShutdownUnconfirmed,
 }
 
 /// Builds dependencies and runs the supervised shadow worker.
@@ -90,7 +94,6 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
     config.reasoning.admitted_providers = admitted_providers_from_environment();
     let reasoning_config = config.reasoning.clone();
     let tracing_config = config.tracing.clone();
-    let application = bootstrap::build(config)?;
     let journal_path = env::var_os("AI_SRE_JOURNAL_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("state/ai-sre.sqlite"));
@@ -108,10 +111,16 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
     let pages = IncidentPages::default();
     let worker_pages = pages.clone();
     let (worker_failed, worker_failed_rx) = oneshot::channel();
+    let (ready, ready_rx) = oneshot::channel();
+    let intake_token = env::var("AI_SRE_ALERTMANAGER_TOKEN")
+        .map_err(|_| ApplicationError::MissingIntakeCredential)?;
+    let intake_next_token = env::var("AI_SRE_ALERTMANAGER_NEXT_TOKEN").ok();
+    let mut worker = owner_thread::OwnerThread::spawn(move |stopping| async move {
+    let application = bootstrap::build(config)?;
     let mut dispatcher = IncidentDispatcher::new(JournalStore::open(journal_path)?);
     dispatcher
         .journal_mut()
-        .set_runtime_metrics(metrics.runtime());
+        .set_runtime_metrics(worker_metrics.runtime());
     let mut deployment_intake = deployment_intake::DeploymentIntake::from_environment()?;
     let mut repair_dispatch = repair_dispatch::RepairDispatch::from_environment()
         .await
@@ -122,7 +131,7 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
         .journal()
         .stored_reports(crate::web::incidents::MAX_STORED_REPORTS)?
     {
-        pages.put_rendered(report.incident_id, report.html).await;
+        worker_pages.put_rendered(report.incident_id, report.html).await;
     }
     let gemini = gated_api_provider(
         "gemini",
@@ -152,7 +161,7 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
     };
     let rig_gate_accepted = env::var("RIG_GATE").ok().as_deref() == Some("accepted");
 
-    let worker = tokio::spawn(async move {
+        let _ = ready.send(());
         let mut admin = admin_listener.map(manual_repair_admin::AdminService::start);
         drain_outbox(&mut dispatcher, ntfy.as_ref()).await;
         worker_metrics
@@ -169,6 +178,7 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
         let mut retry_tick = tokio::time::interval(std::time::Duration::from_secs(15));
         retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         'worker: loop {
+            if *stopping.borrow() { break; }
             let startup = startup_command.is_some();
             let Some(command) = (match startup_command.take() {
                 Some(command) => Some(command),
@@ -199,9 +209,11 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
             }) else {
                 break;
             };
+            if *stopping.borrow() { break; }
             let incidents = match if startup {
                 Ok(command.batch.incidents)
             } else {
+                worker_metrics.runtime().dispatch_started();
                 dispatcher.process_new(command.batch)
             } {
                 Ok(incidents) => {
@@ -215,6 +227,7 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                     break;
                 }
             };
+            if *stopping.borrow() { break; }
             worker_metrics
                 .replace_from(dispatcher.journal().journal())
                 .await;
@@ -377,11 +390,24 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
                     .await;
             }
         }
-    });
-
-    let intake_token = env::var("AI_SRE_ALERTMANAGER_TOKEN")
-        .map_err(|_| ApplicationError::MissingIntakeCredential)?;
-    let intake_next_token = env::var("AI_SRE_ALERTMANAGER_NEXT_TOKEN").ok();
+        Ok::<(), ApplicationError>(())
+    }).map_err(|_| ApplicationError::WorkerFailed)?;
+    tokio::select! {
+        result = ready_rx => {
+            if result.is_err() {
+                return match worker.wait().await {
+                    Ok(Some(Err(error))) => Err(error),
+                    _ => Err(ApplicationError::WorkerFailed),
+                };
+            }
+        }
+        result = worker.wait() => {
+            return match result {
+                Ok(Some(Err(error))) => Err(error),
+                _ => Err(ApplicationError::WorkerFailed),
+            };
+        }
+    }
     let runtime_metrics = metrics.runtime();
     let heartbeat = runtime_metrics.heartbeat();
     tokio::pin!(heartbeat);
@@ -389,21 +415,28 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
         .with_bearer_tokens(intake_token, intake_next_token)
         .serve_with_metrics_and_pages(listener, sender, metrics, pages);
     tokio::pin!(intake);
-    tokio::pin!(worker);
     tokio::select! {
         () = &mut heartbeat => Err(ApplicationError::WorkerFailed),
         result = &mut intake => {
-            worker.abort();
+            worker.shutdown().await.map_err(owner_shutdown_error)?;
             result.map_err(ApplicationError::from)
         },
-        result = &mut worker => {
+        result = worker.wait() => {
             eprintln!("incident worker exited unexpectedly: {result:?}");
             Err(ApplicationError::WorkerFailed)
         },
         _ = worker_failed_rx => {
-            worker.abort();
+            worker.shutdown().await.map_err(owner_shutdown_error)?;
             Err(ApplicationError::WorkerFailed)
         }
+    }
+}
+
+fn owner_shutdown_error(error: std::io::Error) -> ApplicationError {
+    if error.kind() == std::io::ErrorKind::TimedOut {
+        ApplicationError::OwnerShutdownUnconfirmed
+    } else {
+        ApplicationError::WorkerFailed
     }
 }
 
@@ -586,6 +619,22 @@ pub fn listener_address() -> Result<SocketAddr, ApplicationError> {
 #[cfg(test)]
 mod tests {
     use super::valid_price_catalog;
+
+    #[test]
+    fn owner_shutdown_distinguishes_timeout_from_confirmed_failure() {
+        // Given a deadline expiry or a completion-channel failure from a panicked owner.
+        let timeout = std::io::Error::new(std::io::ErrorKind::TimedOut, "synthetic timeout");
+        let panic = std::io::Error::other("synthetic owner failure");
+        // When either shutdown-supervision branch classifies that same error.
+        let unknown = super::owner_shutdown_error(timeout);
+        let confirmed = super::owner_shutdown_error(panic);
+        // Then only expiry reports an unconfirmed owner, independent of the winning branch.
+        assert!(matches!(
+            unknown,
+            super::ApplicationError::OwnerShutdownUnconfirmed
+        ));
+        assert!(matches!(confirmed, super::ApplicationError::WorkerFailed));
+    }
 
     #[test]
     fn price_catalog_requires_provider_identity_price_and_freshness() {

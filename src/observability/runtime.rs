@@ -28,9 +28,14 @@ struct Timing {
 
 /// Restart-reset diagnostic measurements, independent of durable incident facts.
 #[derive(Clone, Default)]
-pub struct RuntimeMetrics(Arc<[Timing; 3]>, Arc<AtomicU64>);
+pub struct RuntimeMetrics(Arc<[Timing; 3]>, Arc<AtomicU64>, Arc<AtomicU64>);
 
 impl RuntimeMetrics {
+    /// Records that the owner dequeued a live webhook batch and began durable dispatch.
+    /// This counts attempts, not commits or incident success.
+    pub fn dispatch_started(&self) {
+        self.2.fetch_add(1, Ordering::Relaxed);
+    }
     /// Records the largest observed intake occupancy, including reserved channel permits.
     /// This is a sampled high-water mark, not a current queue-depth gauge.
     pub fn observe_queue_depth(&self, depth: usize) {
@@ -60,6 +65,10 @@ impl RuntimeMetrics {
             "ai_sre_runtime_intake_queue_depth_max {}\n",
             self.1.load(Ordering::Relaxed)
         );
+        output.push_str(&format!(
+            "ai_sre_runtime_dispatch_started_total {}\n",
+            self.2.load(Ordering::Relaxed)
+        ));
         for (index, name) in ["webhook", "receipt_journal", "timer_delay"]
             .iter()
             .enumerate()
@@ -191,9 +200,11 @@ mod tests {
         metrics.observe(Operation::ReceiptJournal, Duration::from_micros(50));
         metrics.observe_queue_depth(4);
         metrics.observe_queue_depth(2);
+        metrics.dispatch_started();
         // Then count, total, and maximum remain separate and restart resets them.
         let text = metrics.render();
         assert!(text.contains("intake_queue_depth_max 4"));
+        assert!(text.contains("dispatch_started_total 1"));
         assert!(text.contains("receipt_journal_observations_total 2"));
         assert!(text.contains("receipt_journal_microseconds_total 70"));
         assert!(text.contains("receipt_journal_microseconds_max 50"));
