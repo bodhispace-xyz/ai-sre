@@ -1,4 +1,4 @@
-//! GIVEN/WHEN/THEN contracts for the bounded Alertmanager HTTP intake.
+//! Tests bounded Alertmanager intake, durable acknowledgement, and authenticated HTTP metrics.
 
 use ai_sre::{
     observability::MetricsSnapshot,
@@ -71,7 +71,7 @@ async fn authenticated_fragmented_request_waits_for_durable_ack() {
     server.abort();
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "current_thread")]
 async fn metrics_endpoint_requires_auth_and_exposes_fixed_aggregate_names() {
     // Given an authenticated intake with a journal-derived metrics snapshot.
     let path = std::env::temp_dir().join(format!(
@@ -102,6 +102,15 @@ async fn metrics_endpoint_requires_auth_and_exposes_fixed_aggregate_names() {
             .with_bearer_tokens("metrics-secret", Option::<String>::None)
             .serve_with_metrics(listener, sender, metrics),
     );
+    // Given storage-like work held off-thread until the HTTP assertion completes.
+    let (release, wait) = std::sync::mpsc::channel();
+    let (started, ready) = tokio::sync::oneshot::channel();
+    let storage = tokio::task::spawn_blocking(move || {
+        started.send(()).unwrap();
+        wait.recv_timeout(std::time::Duration::from_secs(5))
+            .unwrap();
+    });
+    ready.await.unwrap();
     let mut stream = tokio::net::TcpStream::connect(address)
         .await
         .expect("connect");
@@ -115,14 +124,24 @@ async fn metrics_endpoint_requires_auth_and_exposes_fixed_aggregate_names() {
         .await
         .expect("request");
     let mut response = Vec::new();
-    stream.read_to_end(&mut response).await.expect("response");
+    tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        stream.read_to_end(&mut response),
+    )
+    .await
+    .expect("HTTP progresses while off-thread work is held")
+    .expect("response");
 
     // Then only fixed aggregate names are exposed, never incident labels.
     let response = String::from_utf8(response).expect("UTF-8 response");
     assert!(response.starts_with("HTTP/1.1 200"));
     assert!(response.contains("ai_sre_incidents_opened_total 1"));
+    assert!(response.contains("ai_sre_runtime_timer_delay_observations_total 0"));
     assert!(!response.contains("private-id"));
     server.abort();
+    assert!(server.await.unwrap_err().is_cancelled());
+    release.send(()).unwrap();
+    storage.await.unwrap();
     let _ = std::fs::remove_file(&path);
 }
 

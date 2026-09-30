@@ -8,6 +8,130 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 const WIRE: &str = r#"{"nonce":"original","expires_at":1}"#;
 
 #[tokio::test]
+async fn failed_admission_after_source_capture_never_reserves_remote_work() {
+    use crate::gitops::{artifact::ManualRepairRequest, sandbox::SshWorkerConfig};
+    use std::{fs, process::Command};
+
+    // Given a durable candidate and a real committed source, but no worker credentials.
+    let repository = std::env::temp_dir().join(format!("u9-admission-{}", std::process::id()));
+    fs::create_dir(&repository).unwrap();
+    let git = |args: &[&str]| {
+        let output = Command::new("git")
+            .arg("-C")
+            .arg(&repository)
+            .args(args)
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git(&["init"]);
+    fs::create_dir_all(repository.join("stacks/utility")).unwrap();
+    let source = "services:\n  it-tools:\n    image: ghcr.io/corentinth/it-tools:latest\n";
+    fs::write(repository.join("stacks/utility/compose.yml"), source).unwrap();
+    git(&["add", "."]);
+    git(&[
+        "-c",
+        "user.name=Acceptance",
+        "-c",
+        "user.email=acceptance@example.invalid",
+        "commit",
+        "-m",
+        "fixture",
+    ]);
+    let base = git(&["rev-parse", "HEAD"]);
+    let mut store = JournalStore::open(":memory:").unwrap();
+    let receipt = crate::gitops::receipt::fixture();
+    store.record_deployment(&receipt, 221).unwrap();
+    let scope = JournalContext {
+        incident_id: "incident".into(),
+        run_id: "run".into(),
+    };
+    let evidence = crate::reasoning::storage::fixture_evidence(&mut store, "incident", "run");
+    let candidate = store
+        .prepare_manual_candidate(&ManualRepairRequest {
+            deployment_id: receipt.deployment_id(),
+            incident_id: "incident",
+            run_id: "run",
+            expected_base: &base,
+            current_base: &base,
+            evidence_digest: &evidence,
+            source,
+            now: 221,
+        })
+        .unwrap()
+        .unwrap();
+    let mut worker = SshValidator::new(SshWorkerConfig {
+        host: "127.0.0.1".into(),
+        user: "validator".into(),
+        port: 22222,
+        identity_file: repository.join("missing-key"),
+        known_hosts: repository.join("missing-hosts"),
+    })
+    .unwrap();
+    let policy = HandoffPolicy {
+        max_validation_age_seconds: 300,
+        validator_image: format!(
+            "ghcr.io/bodhispace-xyz/ai-sre-validator@sha256:{}",
+            "a".repeat(64)
+        ),
+        runtime_digest: format!("sha256:{}", "b".repeat(64)),
+        sandbox_limits: Default::default(),
+    };
+    // When the fresh checkpoint check rejects after source capture, before network dispatch.
+    let result = validate_with_recheck(
+        &mut store,
+        &mut worker,
+        ManualValidationRequest {
+            candidate: &candidate,
+            context: &scope,
+            repository: &repository,
+            base: &base,
+            policy: &policy,
+        },
+        || async { Err(SandboxError::Failed) },
+    )
+    .await;
+    // Then no attempt is consumed and no transport failure or remote work is journaled.
+    assert!(result.is_err());
+    assert!(
+        store
+            .manual_validation_attempt(&candidate.artifact_digest())
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(store.journal().project().manual_validation_reservations, 0);
+    fs::remove_dir_all(repository).unwrap();
+}
+
+#[test]
+fn final_admission_imports_revocation_before_handoff_qualification_is_checked() {
+    // Given a deployment that was qualified before the remote validator ran.
+    let mut store = JournalStore::open(":memory:").unwrap();
+    let original = crate::gitops::receipt::fixture();
+    let id = original.deployment_id().to_owned();
+    store.record_deployment(&original, 221).unwrap();
+    assert!(store.qualified_deployment(&id, 221).unwrap().is_some());
+    let mut revoked = crate::gitops::receipt::fixture();
+    revoked.wire.revoked = true;
+    let admission = crate::gitops::admission::Admission {
+        base: "a".repeat(40),
+        deployment_id: id.clone(),
+        receipts: vec![original, revoked],
+        observed_at: 222,
+        expires_at: 250,
+    };
+    // When a fresh final checkpoint includes the revocation that arrived during validation.
+    import_admission(&mut store, &admission, &"a".repeat(40), 223).unwrap();
+    // Then qualification is durably unavailable to the handoff finalizer, regardless of validation success.
+    assert!(store.qualified_deployment(&id, 223).unwrap().is_none());
+    assert!(import_admission(&mut store, &admission, &"b".repeat(40), 223).is_err());
+    assert!(import_admission(&mut store, &admission, &"a".repeat(40), 250).is_err());
+}
+
+#[tokio::test]
 async fn cancelling_response_wait_retains_unknown_outcome_without_invented_timing() {
     // Given a reserved request and a transport that never supplies an authenticated result.
     let mut store = JournalStore::open(":memory:").unwrap();

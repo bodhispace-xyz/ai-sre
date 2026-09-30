@@ -18,6 +18,8 @@ credential, or private SSH key.
 
 - Install the worker binary and JSON configuration under root-owned, non-writable
   paths. The binary checks configuration path ownership and rejects symlinks.
+  The configuration must be a regular file, and its ancestors must be directories.
+  These checks run before opening the file, so a protected FIFO cannot block startup.
 - Set `AI_SRE_VALIDATOR_CONFIG` in the protected forced command. The worker requires
   `SSH_ORIGINAL_COMMAND=ai-sre-validator-v1`, as supplied by sshd. Do not accept
   client environment overrides. Provision a valid rootless `HOME`, runtime
@@ -110,10 +112,13 @@ Qualification and incident evidence are synthetic in this test. "Restart" here
 means reopening the journal, not a hard kill of the running responder. Neither a
 live Alertmanager incident nor a production deployment is exercised.
 
-The coordinator is not yet enabled by the incident loop or an operator endpoint.
-Deployment provisioning, live receipt ingestion, current-readiness assessment, and remote
-Git freshness remain separate acceptance work. No homelab deployment is changed
-by building these entry points.
+The incident loop can invoke the coordinator through the separately enrolled
+[manual repair dispatch](DISPATCH.md) integration. It requires a fresh protected
+source/delivery checkpoint before dispatch and after validation. The optional
+[deployment inbox](INBOX.md) alone does not invoke the coordinator.
+Production provisioning, trusted upstream observation and transfer enrollment,
+and live producer acceptance remain required. Building these entry points does
+not activate a homelab deployment.
 
 ## Verification
 

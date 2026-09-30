@@ -1,7 +1,9 @@
 //! Shadow-only typed GitOps preparation; rendering grants no GitHub or deployment authority.
 
+pub(crate) mod admission;
 pub mod artifact;
 pub mod handoff;
+pub mod inbox;
 pub mod it_tools_image;
 pub mod qualified_deployment;
 pub mod receipt;

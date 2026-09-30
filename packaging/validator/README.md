@@ -22,7 +22,8 @@ docker build --build-context "homelab=$validator_source" \
 The build downloads public dependencies. It copies only provider configuration
 and the committed provider lock from the homelab context. It does not run the
 repository's Makefile or scripts during the build. The final image contains a
-provider mirror and Ansible collections; validation has no download fallback.
+provider mirror for all four current infrastructure roots (LXC, Cloudflare,
+Tailscale, and TrueNAS) and Ansible collections; validation has no download fallback.
 Provider versions match the repository lock, not the latest provider release:
 changing them would change the configuration being validated.
 

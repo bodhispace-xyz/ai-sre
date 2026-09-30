@@ -23,10 +23,12 @@ async fn main() -> Result<(), &'static str> {
     if !path.is_absolute() {
         return Err("invalid worker configuration path");
     }
-    for ancestor in path.ancestors() {
+    for (index, ancestor) in path.ancestors().enumerate() {
         let metadata =
             fs::symlink_metadata(ancestor).map_err(|_| "worker configuration unavailable")?;
-        if metadata.uid() != 0 || metadata.mode() & 0o022 != 0 || metadata.file_type().is_symlink()
+        if metadata.uid() != 0
+            || metadata.mode() & 0o022 != 0
+            || !configuration_component_type(metadata.file_type(), index == 0)
         {
             return Err("worker configuration is not protected");
         }
@@ -83,4 +85,41 @@ async fn main() -> Result<(), &'static str> {
         .map_err(|_| "worker output timeout")?
         .map_err(|_| "worker output failed")?
         .map_err(|_| "worker output failed")
+}
+
+// Check the leaf before opening it: a protected FIFO can still block indefinitely on open.
+fn configuration_component_type(kind: fs::FileType, leaf: bool) -> bool {
+    if leaf { kind.is_file() } else { kind.is_dir() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::configuration_component_type;
+    use std::{fs, os::unix::fs::symlink, process::Command};
+
+    #[test]
+    fn configuration_requires_a_regular_leaf_and_directory_ancestors() {
+        // Given ordinary configuration data and special files that must never be opened as config.
+        let root = std::env::temp_dir().join(format!("ai-sre-config-types-{}", std::process::id()));
+        fs::create_dir(&root).unwrap();
+        fs::write(root.join("config"), "{}").unwrap();
+        symlink(root.join("config"), root.join("link")).unwrap();
+        assert!(
+            Command::new("mkfifo")
+                .arg(root.join("fifo"))
+                .status()
+                .unwrap()
+                .success()
+        );
+        // When the same type gate used before configuration open examines each path component.
+        let kind = |name: &str| fs::symlink_metadata(root.join(name)).unwrap().file_type();
+        // Then only a regular leaf and directory ancestors qualify, without opening the FIFO.
+        assert!(configuration_component_type(kind("config"), true));
+        assert!(!configuration_component_type(kind("config"), false));
+        assert!(configuration_component_type(kind(""), false));
+        for name in ["", "link", "fifo"] {
+            assert!(!configuration_component_type(kind(name), true));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
 }
