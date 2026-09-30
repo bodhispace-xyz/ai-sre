@@ -224,6 +224,9 @@ impl JournalStore {
         receipt: &ProtectedReceipt,
         now: u64,
     ) -> Result<bool, JournalStoreError> {
+        let _duration = self
+            .runtime_metrics
+            .measure(crate::observability::runtime::Operation::ReceiptJournal);
         let wire = &receipt.wire;
         wire.validate_shape()
             .map_err(|_| JournalStoreError::InvalidDeployment)?;
