@@ -61,3 +61,37 @@ blocking calls across the pool, or change SQLite durability settings. The
 experiment's temporary ownership transfer is evidence, not the final application
 architecture. A storage-thread refactor needs deeper review of all journal users,
 manual-repair qualification, reservation ordering, and restart semantics.
+
+## Implemented isolation boundary
+
+Caller review found the journal tightly coupled to the single incident owner.
+This branch therefore implements [incident-owner isolation](../engineering/incident-owner-isolation.md),
+not independent per-method storage commands. It retains one mutable journal and
+the existing bounded intake queue. The real service-binary regression confirms
+HTTP progress during actual SQLite contention and acknowledgement only after
+writer release. Review the documented cancellation and shutdown limits before merge.
+
+Verification on 2026-09-30:
+
+- Full local CI passed: formatting, strict Clippy, 238 tests, documentation,
+  and dependency checks. Two opt-in Tempo tests and the induced-contention
+  diagnostic were skipped by the ordinary suite; the diagnostic passed twice
+  when run explicitly as recorded above.
+- The actual service-binary contention test and both owner-boundary tests passed
+  explicitly on isolated Linux as well as in the local suite.
+- The existing Linux-root dispatch reservation/restart test and protected inbox
+  revocation test passed explicitly with synthetic fixtures.
+- No production deployment, credentials, or enrollment changed.
+
+Prioritized review handoff:
+
+1. Must review before merge: owner cancellation and completion lifetime,
+   startup readiness, durable acknowledgement order, and fail-stop handling
+   when shutdown cannot confirm journal release.
+2. Safe to defer: worker-local timer isolation, production workload benchmarks,
+   and a database-only async facade. Graceful OS signal handling remains
+   unproven and must not be claimed by this batch.
+3. Deliberate decisions: move the coupled incident owner instead of individual
+   storage calls; retain the existing bounded queue and durability settings;
+   use process-level recovery after unconfirmed shutdown rather than replacing
+   an owner in place.
