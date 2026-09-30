@@ -275,12 +275,20 @@ async fn handle_webhook(
     body: Result<Bytes, BytesRejection>,
 ) -> Response {
     let result = async {
+        let _duration = state
+            .metrics
+            .runtime()
+            .measure(crate::observability::runtime::Operation::Webhook);
         authenticate(&state.intake, &headers)?;
         let body = body.map_err(|_| IntakeError::BodyTooLarge)?;
         if body.len() > state.intake.config.max_body_bytes {
             return Err(IntakeError::BodyTooLarge);
         }
         let batch = parse_body(&body)?;
+        state
+            .metrics
+            .runtime()
+            .observe_queue_depth(state.sender.max_capacity() - state.sender.capacity());
         let (acknowledged, response) = oneshot::channel();
         tokio::time::timeout(
             INTAKE_ACK_TIMEOUT,
@@ -292,6 +300,10 @@ async fn handle_webhook(
         .await
         .map_err(|_| IntakeError::QueueUnavailable)?
         .map_err(|_| IntakeError::QueueUnavailable)?;
+        state
+            .metrics
+            .runtime()
+            .observe_queue_depth(state.sender.max_capacity() - state.sender.capacity());
         tokio::time::timeout(INTAKE_ACK_TIMEOUT, response)
             .await
             .map_err(|_| IntakeError::QueueUnavailable)?
