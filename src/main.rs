@@ -33,6 +33,15 @@ async fn main() -> Result<(), MainError> {
         }
     };
     let listener = TcpListener::bind(application::listener_address()?).await?;
-    application::serve(config, listener).await?;
+    // Register both handlers before starting the owner, including its startup recovery.
+    let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+    let mut interrupt = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    application::serve_until(config, listener, async move {
+        tokio::select! {
+            _ = terminate.recv() => {},
+            _ = interrupt.recv() => {},
+        }
+    })
+    .await?;
     Ok(())
 }

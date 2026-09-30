@@ -90,7 +90,18 @@ pub enum ApplicationError {
 }
 
 /// Builds dependencies and runs the supervised shadow worker.
-pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), ApplicationError> {
+pub async fn serve(config: AppConfig, listener: TcpListener) -> Result<(), ApplicationError> {
+    serve_until(config, listener, std::future::pending()).await
+}
+
+/// Stops intake on request and confirms owner release before reporting successful shutdown.
+/// Running synchronous journal commits may complete; asynchronous investigations are cancelled.
+pub async fn serve_until(
+    mut config: AppConfig,
+    listener: TcpListener,
+    shutdown: impl std::future::Future<Output = ()>,
+) -> Result<(), ApplicationError> {
+    tokio::pin!(shutdown);
     config.reasoning.admitted_providers = admitted_providers_from_environment();
     let reasoning_config = config.reasoning.clone();
     let tracing_config = config.tracing.clone();
@@ -393,6 +404,11 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
         Ok::<(), ApplicationError>(())
     }).map_err(|_| ApplicationError::WorkerFailed)?;
     tokio::select! {
+        () = &mut shutdown => {
+            drop(listener);
+            drop(sender);
+            return shutdown_owner(&mut worker).await;
+        }
         result = ready_rx => {
             if result.is_err() {
                 return match worker.wait().await {
@@ -411,11 +427,17 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
     let runtime_metrics = metrics.runtime();
     let heartbeat = runtime_metrics.heartbeat();
     tokio::pin!(heartbeat);
-    let intake = AlertIntake::new(IntakeConfig::default())
-        .with_bearer_tokens(intake_token, intake_next_token)
-        .serve_with_metrics_and_pages(listener, sender, metrics, pages);
-    tokio::pin!(intake);
+    let mut intake = Box::pin(
+        AlertIntake::new(IntakeConfig::default())
+            .with_bearer_tokens(intake_token, intake_next_token)
+            .serve_with_metrics_and_pages(listener, sender, metrics, pages),
+    );
     tokio::select! {
+        () = &mut shutdown => {
+            // Drop the actual server future, not merely its pinned reference, before waiting.
+            drop(intake);
+            shutdown_owner(&mut worker).await
+        },
         () = &mut heartbeat => Err(ApplicationError::WorkerFailed),
         result = &mut intake => {
             worker.shutdown().await.map_err(owner_shutdown_error)?;
@@ -429,6 +451,15 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
             worker.shutdown().await.map_err(owner_shutdown_error)?;
             Err(ApplicationError::WorkerFailed)
         }
+    }
+}
+
+async fn shutdown_owner(
+    worker: &mut owner_thread::OwnerThread<Result<(), ApplicationError>>,
+) -> Result<(), ApplicationError> {
+    match worker.shutdown().await.map_err(owner_shutdown_error)? {
+        Some(result) => result,
+        None => Ok(()),
     }
 }
 
