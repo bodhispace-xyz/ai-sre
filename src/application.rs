@@ -109,6 +109,9 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
     let worker_pages = pages.clone();
     let (worker_failed, worker_failed_rx) = oneshot::channel();
     let mut dispatcher = IncidentDispatcher::new(JournalStore::open(journal_path)?);
+    dispatcher
+        .journal_mut()
+        .set_runtime_metrics(metrics.runtime());
     let mut deployment_intake = deployment_intake::DeploymentIntake::from_environment()?;
     let mut repair_dispatch = repair_dispatch::RepairDispatch::from_environment()
         .await
@@ -379,12 +382,16 @@ pub async fn serve(mut config: AppConfig, listener: TcpListener) -> Result<(), A
     let intake_token = env::var("AI_SRE_ALERTMANAGER_TOKEN")
         .map_err(|_| ApplicationError::MissingIntakeCredential)?;
     let intake_next_token = env::var("AI_SRE_ALERTMANAGER_NEXT_TOKEN").ok();
+    let runtime_metrics = metrics.runtime();
+    let heartbeat = runtime_metrics.heartbeat();
+    tokio::pin!(heartbeat);
     let intake = AlertIntake::new(IntakeConfig::default())
         .with_bearer_tokens(intake_token, intake_next_token)
         .serve_with_metrics_and_pages(listener, sender, metrics, pages);
     tokio::pin!(intake);
     tokio::pin!(worker);
     tokio::select! {
+        () = &mut heartbeat => Err(ApplicationError::WorkerFailed),
         result = &mut intake => {
             worker.abort();
             result.map_err(ApplicationError::from)
