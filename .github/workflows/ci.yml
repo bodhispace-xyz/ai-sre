@@ -47,7 +47,7 @@ jobs:
 
       - name: Install pinned CI tools
         # taiki-e/install-action v2.87.22, verified 2026-09-30.
-        uses: taiki-e/install-action@83ac0ad63c0167e6f06796fab0fce28db1bf3db0
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91
         with:
           tool: cargo-nextest@0.9.143,cargo-deny@0.20.2
           fallback: none
